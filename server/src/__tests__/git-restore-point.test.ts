@@ -301,6 +301,34 @@ describe("git restore points", () => {
       expect(await read(restored, "ui/tsconfig.tsbuildinfo")).toBe("{\"version\":\"5\"}\n");
     });
 
+    it("saves a quoted-looking ignored path from inside the workspace, never the file it names", async () => {
+      await ignoredWork();
+      await write(work, ".gitignore", "node_modules/\n.env\n*.tsbuildinfo\nevidence/\ndist/\n\"*\n");
+      git(work, "commit", "-q", "-am", "ignore quoted names");
+      git(work, "push", "-q", "origin", "HEAD:master");
+      const outside = path.join(root, "outside-secret.txt");
+      await fs.writeFile(outside, "outside the workspace\n");
+      const crafted = `"${outside}"`;
+      await write(work, crafted, "workspace file with a quoted name\n");
+      const { payload } = (await captureRestorePoint({ cwd: work, upstreamCommits: upstream() }))!;
+      const restored = await freshClone("restored-quoted");
+      const imported = await importRestorePoint({ repositoryCwd: restored, payload });
+      await applyRestorePoint({ cwd: restored, manifest: imported });
+      expect(await read(restored, crafted)).toBe("workspace file with a quoted name\n");
+    });
+
+    it("keeps an ignored symlink's target bytes exactly", async () => {
+      await ignoredWork();
+      const target = Buffer.from([0x2e, 0x2e, 0x2f, 0x66, 0xff, 0x6f]);
+      try { await fs.symlink(target, path.join(work, "evidence", "odd-link")); }
+      catch { return; }
+      const { payload } = (await captureRestorePoint({ cwd: work, upstreamCommits: upstream() }))!;
+      const restored = await freshClone("restored-link");
+      const imported = await importRestorePoint({ repositoryCwd: restored, payload });
+      await applyRestorePoint({ cwd: restored, manifest: imported });
+      expect(await fs.readlink(path.join(restored, "evidence", "odd-link"), { encoding: "buffer" })).toEqual(target);
+    });
+
     it("skips an ignored nested repository", async () => {
       await ignoredWork();
       git(work, "init", "-q", path.join(work, "evidence/nested"));

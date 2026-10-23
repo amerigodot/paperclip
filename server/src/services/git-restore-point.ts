@@ -191,6 +191,16 @@ async function scanChangedPaths(cwd: string, limits: RestorePointLimits, signal?
   return { modes: modes.sort((a, b) => a.path.localeCompare(b.path)) };
 }
 
+function quoteGitPath(file: string) {
+  let quoted = "\"";
+  for (const byte of Buffer.from(file, "utf8")) {
+    if (byte === 0x22 || byte === 0x5c) quoted += `\\${String.fromCharCode(byte)}`;
+    else if (byte < 0x20 || byte >= 0x7f) quoted += `\\${byte.toString(8).padStart(3, "0")}`;
+    else quoted += String.fromCharCode(byte);
+  }
+  return `${quoted}"`;
+}
+
 async function rawIgnoredTree(cwd: string, env: Record<string, string>, temporary: string, files: string[], signal?: AbortSignal) {
   if (files.length === 0) return null;
   const entries: string[] = [];
@@ -200,14 +210,16 @@ async function rawIgnoredTree(cwd: string, env: Record<string, string>, temporar
     if (/[\n\r]/.test(file)) throw new RestorePointSkip("unsupported_path");
     const stat = await fs.lstat(path.join(cwd, file));
     if (stat.isSymbolicLink()) {
-      const blob = await gitText(cwd, ["hash-object", "-w", "--no-filters", "--stdin"], { env, signal, input: await fs.readlink(path.join(cwd, file)) });
+      const blob = await gitText(cwd, ["hash-object", "-w", "--no-filters", "--stdin"], { env, signal,
+        input: await fs.readlink(path.join(cwd, file), { encoding: "buffer" }) });
       entries.push(`120000 ${blob}\t${file}`);
     } else if (stat.isFile()) regular.push(file);
     else if (stat.isDirectory()) throw new RestorePointSkip("untracked_nested_repository");
     else throw new RestorePointSkip("unsupported_special_file");
   }
   if (regular.length > 0) {
-    const blobs = (await gitText(cwd, ["hash-object", "-w", "--no-filters", "--stdin-paths"], { env, signal, input: regular.join("\n") + "\n" })).split("\n");
+    const blobs = (await gitText(cwd, ["hash-object", "-w", "--no-filters", "--stdin-paths"], { env, signal,
+      input: regular.map(quoteGitPath).join("\n") + "\n" })).split("\n");
     if (blobs.length !== regular.length || blobs.some(blob => !SHA.test(blob))) throw new RestorePointSkip("unsupported_path");
     for (const [index, file] of regular.entries()) {
       const mode = (await fs.lstat(path.join(cwd, file))).mode & 0o111 ? "100755" : "100644";
@@ -251,7 +263,7 @@ async function writeIgnoredFiles(cwd: string, commit: string, signal?: AbortSign
       await fs.mkdir(path.dirname(entry.target), { recursive: true });
       const parent = await fs.realpath(path.dirname(entry.target));
       if (parent !== cwd && !parent.startsWith(`${cwd}${path.sep}`)) throw new RestorePointRestoreFailure("invalid_payload");
-      if (entry.mode === "120000") await fs.symlink(blobs[index]!.toString("utf8"), entry.target);
+      if (entry.mode === "120000") await fs.symlink(blobs[index]!, entry.target);
       else await fs.writeFile(entry.target, blobs[index]!, { flag: "wx", mode: entry.mode === "100755" ? 0o755 : 0o644 });
       written.push(entry.target);
     }
