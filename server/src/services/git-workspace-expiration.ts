@@ -58,7 +58,7 @@ const RESTORE_POINT_RELAXABLE = new Set(["dirty_or_untracked_files", "unique_ign
 const CHECKOUT_RESTORE_POINT_RELAXABLE = new Set(["dirty_or_untracked_files", "unpushed_managed_checkout", "unique_ignored_files",
   "unique_original_head", "unique_reflog_commits"]);
 
-type CheckoutRestorePointNeed = { headOnRemote: boolean; path: string; repoUrl: string };
+type CheckoutRestorePointNeed = { headOnRemote: boolean; path: string; repoUrl: string; preserve: string[] };
 
 async function restorePointBoundary(cwd: string, repoUrl: string, headOnRemote: boolean, auth: GitRemoteAuthProvider, signal?: AbortSignal) {
   const head = (await gitCacheCommand(cwd, ["rev-parse", "--verify", "HEAD^{commit}"], signal)).trim();
@@ -208,8 +208,8 @@ function managedCheckoutProver(db: Db, workspace: Workspace, auth: GitRemoteAuth
     try { await assertReproducibleManagedCheckout(checkoutPath, { repoUrl: source.repoUrl, resolveGitAuth: auth, signal }); }
     catch (error) {
       if (!restorePoints || !CHECKOUT_RESTORE_POINT_RELAXABLE.has(skipReason(error))) throw error;
-      const { headOnRemote } = await assertReproducibleManagedCheckout(checkoutPath, { repoUrl: source.repoUrl, resolveGitAuth: auth, signal, restorePoint: true });
-      restorePoints.set(name, { headOnRemote, path: checkoutPath, repoUrl: source.repoUrl });
+      const { headOnRemote, preserve } = await assertReproducibleManagedCheckout(checkoutPath, { repoUrl: source.repoUrl, resolveGitAuth: auth, signal, restorePoint: true });
+      restorePoints.set(name, { headOnRemote, path: checkoutPath, repoUrl: source.repoUrl, preserve });
     }
     checkouts.set(name, await readManagedCheckoutContents(checkoutPath, name, { ...source, repoUrl: source.repoUrl }, signal));
   };
@@ -294,7 +294,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
             } else if (!headOnRemote) throw new Error("upstream_commit_unverified");
             for (const [name, need] of [...checkoutRestorePoints.entries()].sort(([a], [b]) => a.localeCompare(b))) {
               const storedCheckout = await storeGitRestorePoint({ db, storage: options.restorePoint!.storage, workspace: owner,
-                cwd: need.path, checkout: name, generation, headOnRemote: need.headOnRemote, limits: options.restorePoint!.limits,
+                cwd: need.path, checkout: name, generation, headOnRemote: need.headOnRemote, preserveCommits: need.preserve, limits: options.restorePoint!.limits,
                 signal: options.signal, upstreamCommits: await restorePointBoundary(need.path, need.repoUrl, need.headOnRemote, auth, options.signal) });
               if (!storedCheckout) {
                 if (!need.headOnRemote) throw new Error("unpushed_managed_checkout");

@@ -229,8 +229,8 @@ async function existingCommits(cwd: string, commits: readonly string[], signal?:
   return present;
 }
 
-async function unpreservedHistory(cwd: string, head: string, boundary: readonly string[], signal?: AbortSignal) {
-  const candidates = new Set<string>();
+async function unpreservedHistory(cwd: string, head: string, boundary: readonly string[], signal?: AbortSignal, extra: readonly string[] = []) {
+  const candidates = new Set<string>(await existingCommits(cwd, extra, signal));
   const reflog = await gitText(cwd, ["reflog", "show", "--format=%H", "HEAD"], { signal }).catch(() => "");
   for (const line of reflog.split("\n")) if (SHA.test(line)) candidates.add(line);
   const original = await gitText(cwd, ["rev-parse", "--verify", "-q", "ORIG_HEAD^{commit}"], { signal }).catch(() => "");
@@ -281,6 +281,7 @@ export function decodeRestorePointPayload(payload: Buffer): { manifest: RestoreP
 export async function captureRestorePoint(input: {
   cwd: string;
   upstreamCommits: readonly string[];
+  preserveCommits?: readonly string[];
   limits?: Partial<RestorePointLimits>;
   signal?: AbortSignal;
 }): Promise<{ payload: Buffer; manifest: RestorePointManifest } | null> {
@@ -292,7 +293,7 @@ export async function captureRestorePoint(input: {
     const { store, env } = await snapshotStore(cwd, temporary);
     const snapshot = await snapshotCommits(cwd, env, temporary, modes, input.signal);
     const boundary = await existingCommits(cwd, input.upstreamCommits, input.signal);
-    const preserved = await unpreservedHistory(cwd, snapshot.head, boundary, input.signal);
+    const preserved = await unpreservedHistory(cwd, snapshot.head, boundary, input.signal, input.preserveCommits);
     const headOnUpstream = await (async () => {
       for (const tip of boundary) {
         if (await git(cwd, ["merge-base", "--is-ancestor", snapshot.head, tip], { signal: input.signal }).then(() => true, () => false)) return true;
@@ -451,5 +452,7 @@ export async function restorePointHistoryDigest(input: string, signal?: AbortSig
   const cwd = await fs.realpath(input);
   const reflog = await gitText(cwd, ["reflog", "show", "--format=%H", "HEAD"], { signal }).catch(() => "");
   const original = await gitText(cwd, ["rev-parse", "--verify", "-q", "ORIG_HEAD^{commit}"], { signal }).catch(() => "");
-  return createHash("sha256").update(JSON.stringify([reflog.split("\n").filter((line) => SHA.test(line)), SHA.test(original) ? original : null])).digest("hex");
+  const remotes = await gitText(cwd, ["for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes"], { signal }).catch(() => "");
+  return createHash("sha256").update(JSON.stringify([reflog.split("\n").filter((line) => SHA.test(line)), SHA.test(original) ? original : null,
+    remotes.split("\n").filter(Boolean)])).digest("hex");
 }

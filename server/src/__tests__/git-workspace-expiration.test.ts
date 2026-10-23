@@ -177,33 +177,6 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
     return { ...f, nestedSource, nestedRemote, nestedA, preparation, nested: nested!, settings, settingsPath, nestedSettingsPath };
   }
 
-  it("expires a nested workspace whose remote-tracking ref points at a branch the remote deleted", async () => {
-    const f = await nestedFixture(false);
-    git(f.nestedSource, "checkout", "-q", "-b", "squashed-away");
-    await fs.writeFile(path.join(f.nestedSource, "feature.txt"), "merged by squash, then deleted\n");
-    git(f.nestedSource, "add", "."); git(f.nestedSource, "commit", "-m", "Feature");
-    const feature = git(f.nestedSource, "rev-parse", "HEAD");
-    git(f.nestedSource, "push", "-q", f.nestedRemote, "squashed-away");
-    git(f.nested.cwd, "fetch", "-q", "origin", "+refs/heads/squashed-away:refs/remotes/origin/squashed-away");
-    expect(git(f.nested.cwd, "rev-parse", "refs/remotes/origin/squashed-away")).toBe(feature);
-    git(f.nestedRemote, "branch", "-D", "squashed-away");
-    git(f.nestedRemote, "reflog", "expire", "--expire=now", "--all");
-    git(f.nestedRemote, "gc", "-q", "--prune=now");
-    expect(() => git(f.nestedRemote, "cat-file", "-e", `${feature}^{commit}`)).toThrow();
-    expect(await f.expire({ expireBase: false })).toMatchObject({ expired: true, skipReason: null });
-    expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
-    expect(git(f.nested.cwd, "rev-parse", "HEAD")).toBe(f.nestedA);
-  });
-
-  it("still keeps a nested workspace whose local branch holds a commit the remote lacks", async () => {
-    const f = await nestedFixture(false);
-    const localOnly = execFileSync("git", ["commit-tree", git(f.nested.cwd, "rev-parse", "HEAD^{tree}"), "-p", "HEAD", "-m", "Local only"],
-      { cwd: f.nested.cwd, env: gitEnv, encoding: "utf8" }).trim();
-    git(f.nested.cwd, "update-ref", "refs/heads/local-only", localOnly);
-    expect(await f.expire({ expireBase: false })).toMatchObject({ expired: false, skipReason: "unpushed_managed_checkout" });
-    expect(await exists(f.cwd)).toBe(true);
-  });
-
   it("expires a nested workspace and its unused private base with the generated ignore entry", async () => {
     const f = await nestedFixture(false);
     await f.advance();
@@ -344,6 +317,49 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       await plant(file);
       expect(await f.expire({ expireBase: false, restorePoint: restorePoint() }))
         .toMatchObject({ expired: false, skipReason: "unsupported_commit_message" });
+      expect(await exists(f.cwd)).toBe(true);
+      vi.unstubAllEnvs();
+    });
+
+    async function staleRemoteTrackingRef(f: Awaited<ReturnType<typeof nestedFixture>>) {
+      git(f.nestedSource, "checkout", "-q", "-b", "squashed-away");
+      await fs.writeFile(path.join(f.nestedSource, "feature.txt"), "merged by squash, then deleted\n");
+      git(f.nestedSource, "add", "."); git(f.nestedSource, "commit", "-m", "Feature");
+      const feature = git(f.nestedSource, "rev-parse", "HEAD");
+      git(f.nestedSource, "push", "-q", f.nestedRemote, "squashed-away");
+      git(f.nestedSource, "checkout", "-q", "main");
+      git(f.nested.cwd, "fetch", "-q", "origin", "+refs/heads/squashed-away:refs/remotes/origin/squashed-away");
+      git(f.nestedRemote, "branch", "-D", "squashed-away");
+      git(f.nestedRemote, "reflog", "expire", "--expire=now", "--all");
+      git(f.nestedRemote, "gc", "-q", "--prune=now");
+      expect(() => git(f.nestedRemote, "cat-file", "-e", `${feature}^{commit}`)).toThrow();
+      return feature;
+    }
+
+    it("saves a clean nested checkout's stale remote-tracking commits in its restore point", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      const feature = await staleRemoteTrackingRef(f);
+      expect(await f.expire({ expireBase: false })).toMatchObject({ expired: false, skipReason: "unpushed_managed_checkout" });
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() })).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
+      const recipe = (await f.row()).metadata?.gitCacheRestoration as Record<string, any>;
+      expect(recipe.contents.checkouts[0].restorePoint).toMatchObject({ head: f.nestedA, headOnRemote: true, worktree: null });
+      expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
+      expect(git(f.nested.cwd, "rev-parse", "HEAD")).toBe(f.nestedA);
+      expect(git(f.nested.cwd, "cat-file", "-t", feature)).toBe("commit");
+      vi.unstubAllEnvs();
+    });
+
+    it("rolls back when a nested checkout's remote-tracking refs change after capture", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await staleRemoteTrackingRef(f);
+      const result = await f.expire({ expireBase: false, restorePoint: restorePoint(), beforeDelete: async () => {
+        const later = execFileSync("git", ["commit-tree", git(f.nested.cwd, "rev-parse", "HEAD^{tree}"), "-p", "HEAD", "-m", "Fetched after capture"],
+          { cwd: f.nested.cwd, env: gitEnv, encoding: "utf8" }).trim();
+        git(f.nested.cwd, "update-ref", "refs/remotes/origin/fetched-later", later);
+      } });
+      expect(result).toMatchObject({ expired: false, skipReason: "restore_point_contents_changed" });
       expect(await exists(f.cwd)).toBe(true);
       vi.unstubAllEnvs();
     });
