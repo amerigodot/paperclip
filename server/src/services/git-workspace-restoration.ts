@@ -272,7 +272,7 @@ export async function assertReproducibleManagedCheckout(checkout: string, input:
       ...shas(await gitCacheCommand(checkout, ["rev-parse", "--verify", "-q", "ORIG_HEAD^{commit}"], signal).catch(() => ""))]);
     const recorded = new Set([
       ...shas(await gitCacheCommand(checkout, ["for-each-ref", "--format=%(objectname)", "refs/heads", "refs/tags"], signal)),
-      ...shas(await gitCacheCommand(checkout, ["reflog", "show", "--all", "--format=%H"], signal).catch(() => "")),
+      ...await localReflogCommits(checkout, signal),
     ]);
     const current = (await gitCacheCommand(checkout, ["symbolic-ref", "--quiet", "HEAD"], signal).catch(() => "")).trim();
     const otherTips = (await gitCacheCommand(checkout, ["for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags"], signal))
@@ -292,8 +292,8 @@ export async function assertReproducibleManagedCheckout(checkout: string, input:
   }
   const localTips = new Set([
     ...(await gitCacheCommand(checkout, ["rev-parse", "--verify", "HEAD^{commit}"], signal)).split("\n"),
-    ...(await gitCacheCommand(checkout, ["for-each-ref", "--format=%(objectname)"], signal)).split("\n"),
-    ...(await gitCacheCommand(checkout, ["reflog", "show", "--all", "--format=%H"], signal).catch(() => "")).split("\n"),
+    ...(await gitCacheCommand(checkout, ["for-each-ref", "--format=%(objectname)", "refs/heads", "refs/tags"], signal)).split("\n"),
+    ...await localReflogCommits(checkout, signal),
   ].map(line => line.trim()).filter(sha => shaPattern.test(sha)));
   if (localTips.size > MANAGED_CHECKOUT_LOCAL_TIP_LIMIT) throw new Error("managed_checkout_local_tip_budget");
   if (localTips.size && await hasCommitsMissingUpstream(checkout, [...localTips], input.repoUrl, input.resolveGitAuth, signal)) {
@@ -305,6 +305,18 @@ export async function assertReproducibleManagedCheckout(checkout: string, input:
 }
 
 const MANAGED_CHECKOUT_LOCAL_TIP_LIMIT = 5_000;
+
+async function localReflogCommits(checkout: string, signal?: AbortSignal) {
+  const refs = ["HEAD", ...(await gitCacheCommand(checkout, ["for-each-ref", "--format=%(refname)", "refs/heads"], signal))
+    .split("\n").map(line => line.trim()).filter(Boolean)];
+  if (refs.length > MANAGED_CHECKOUT_LOCAL_TIP_LIMIT) throw new Error("managed_checkout_local_tip_budget");
+  const commits: string[] = [];
+  for (const ref of refs) {
+    const log = await gitCacheCommand(checkout, ["reflog", "show", "--format=%H", ref, "--"], signal).catch(() => "");
+    commits.push(...log.split("\n").map(line => line.trim()).filter(sha => shaPattern.test(sha)));
+  }
+  return commits;
+}
 
 async function hasCommitsMissingUpstream(checkout: string, localTips: string[], repoUrl: string,
   resolveGitAuth: GitRemoteAuthProvider, signal?: AbortSignal, covered: string[] = []) {
