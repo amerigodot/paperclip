@@ -191,6 +191,76 @@ async function scanChangedPaths(cwd: string, limits: RestorePointLimits, signal?
   return { modes: modes.sort((a, b) => a.path.localeCompare(b.path)) };
 }
 
+async function rawIgnoredTree(cwd: string, env: Record<string, string>, temporary: string, files: string[], signal?: AbortSignal) {
+  if (files.length === 0) return null;
+  const entries: string[] = [];
+  const regular: string[] = [];
+  for (const file of files) {
+    if (file.endsWith("/")) throw new RestorePointSkip("untracked_nested_repository");
+    if (/[\n\r]/.test(file)) throw new RestorePointSkip("unsupported_path");
+    const stat = await fs.lstat(path.join(cwd, file));
+    if (stat.isSymbolicLink()) {
+      const blob = await gitText(cwd, ["hash-object", "-w", "--no-filters", "--stdin"], { env, signal, input: await fs.readlink(path.join(cwd, file)) });
+      entries.push(`120000 ${blob}\t${file}`);
+    } else if (stat.isFile()) regular.push(file);
+    else if (stat.isDirectory()) throw new RestorePointSkip("untracked_nested_repository");
+    else throw new RestorePointSkip("unsupported_special_file");
+  }
+  if (regular.length > 0) {
+    const blobs = (await gitText(cwd, ["hash-object", "-w", "--no-filters", "--stdin-paths"], { env, signal, input: regular.join("\n") + "\n" })).split("\n");
+    if (blobs.length !== regular.length || blobs.some(blob => !SHA.test(blob))) throw new RestorePointSkip("unsupported_path");
+    for (const [index, file] of regular.entries()) {
+      const mode = (await fs.lstat(path.join(cwd, file))).mode & 0o111 ? "100755" : "100644";
+      entries.push(`${mode} ${blobs[index]}\t${file}`);
+    }
+  }
+  const ignoredEnv = { ...env, GIT_INDEX_FILE: path.join(temporary, "ignored-index") };
+  await git(cwd, ["update-index", "-z", "--index-info"], { env: ignoredEnv, signal, input: entries.join("\0") + "\0" });
+  return await gitText(cwd, ["write-tree"], { env: ignoredEnv, signal });
+}
+
+async function writeIgnoredFiles(cwd: string, commit: string, signal?: AbortSignal) {
+  const listing = nulList(await git(cwd, ["ls-tree", "-r", "-z", `${commit}^{tree}`], { signal }));
+  const entries = listing.map((line) => {
+    const match = /^(100644|100755|120000) blob ([0-9a-f]{40})\t(.+)$/s.exec(line);
+    if (!match) throw new RestorePointRestoreFailure("invalid_payload");
+    const target = path.join(cwd, match[3]!);
+    if (path.isAbsolute(match[3]!) || match[3]!.split("/").includes("..") || !target.startsWith(`${cwd}${path.sep}`)) {
+      throw new RestorePointRestoreFailure("invalid_payload");
+    }
+    return { mode: match[1]!, blob: match[2]!, target };
+  });
+  for (const entry of entries) {
+    if (await fs.lstat(entry.target).then(() => true, () => false)) throw new RestorePointRestoreFailure("ignored_files_conflict");
+  }
+  const contents = await git(cwd, ["cat-file", "--batch"], { signal, input: entries.map((entry) => entry.blob).join("\n") + "\n",
+    maxBuffer: 2 * DEFAULT_RESTORE_POINT_LIMITS.maxTotalBytes });
+  const blobs: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const header = contents.subarray(offset, contents.indexOf(0x0a, offset)).toString("utf8");
+    const [sha, type, size] = header.split(" ");
+    if (sha !== entry.blob || type !== "blob" || !/^\d+$/.test(size ?? "")) throw new RestorePointRestoreFailure("invalid_payload");
+    const start = offset + header.length + 1;
+    blobs.push(contents.subarray(start, start + Number(size)));
+    offset = start + Number(size) + 1;
+  }
+  const written: string[] = [];
+  try {
+    for (const [index, entry] of entries.entries()) {
+      await fs.mkdir(path.dirname(entry.target), { recursive: true });
+      const parent = await fs.realpath(path.dirname(entry.target));
+      if (parent !== cwd && !parent.startsWith(`${cwd}${path.sep}`)) throw new RestorePointRestoreFailure("invalid_payload");
+      if (entry.mode === "120000") await fs.symlink(blobs[index]!.toString("utf8"), entry.target);
+      else await fs.writeFile(entry.target, blobs[index]!, { flag: "wx", mode: entry.mode === "100755" ? 0o755 : 0o644 });
+      written.push(entry.target);
+    }
+  } catch (error) {
+    for (const target of written.reverse()) await fs.rm(target, { force: true });
+    throw error instanceof RestorePointRestoreFailure ? error : new RestorePointRestoreFailure("ignored_files_conflict");
+  }
+}
+
 async function snapshotTrees(cwd: string, env: Record<string, string>, temporary: string, signal?: AbortSignal) {
   const indexCopy = path.join(temporary, "index");
   await copyIndex(cwd, indexCopy);
@@ -204,14 +274,7 @@ async function snapshotTrees(cwd: string, env: Record<string, string>, temporary
   const worktreeTree = await gitText(cwd, ["write-tree"], { env: worktreeEnv, signal });
   const gitlinks = await gitText(cwd, ["ls-tree", "-r", worktreeTree], { env, signal });
   if (/^160000 /m.test(gitlinks)) throw new RestorePointSkip("submodules_unsupported");
-  const ignoredFiles = await savedIgnoredFiles(cwd, signal);
-  let ignoredTree: string | null = null;
-  if (ignoredFiles.length > 0) {
-    const ignoredEnv = { ...env, GIT_INDEX_FILE: path.join(temporary, "ignored-index"), GIT_LITERAL_PATHSPECS: "1" };
-    await git(cwd, ["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], { env: ignoredEnv, signal, input: ignoredFiles.join("\0") });
-    ignoredTree = await gitText(cwd, ["write-tree"], { env: ignoredEnv, signal });
-    if (/^160000 /m.test(await gitText(cwd, ["ls-tree", "-r", ignoredTree], { env, signal }))) throw new RestorePointSkip("untracked_nested_repository");
-  }
+  const ignoredTree = await rawIgnoredTree(cwd, env, temporary, await savedIgnoredFiles(cwd, signal), signal);
   return { indexTree, worktreeTree, ignoredTree };
 }
 
@@ -407,17 +470,7 @@ export async function applyRestorePoint(input: { cwd: string; manifest: RestoreP
     if (diff.length > 0) await git(cwd, ["apply", "--binary", "--whitespace=nowarn", "-"], { input: diff, signal: input.signal });
     await git(cwd, ["read-tree", `${manifest.index}^{tree}`], { signal: input.signal });
   }
-  if (manifest.ignored) {
-    const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-restore-point-"));
-    try {
-      const ignoredEnv = { GIT_INDEX_FILE: path.join(temporary, "ignored-index") };
-      await git(cwd, ["read-tree", `${manifest.ignored}^{tree}`], { env: ignoredEnv, signal: input.signal });
-      await git(cwd, ["checkout-index", "-a"], { env: ignoredEnv, signal: input.signal })
-        .catch(() => { throw new RestorePointRestoreFailure("ignored_files_conflict"); });
-    } finally {
-      await fs.rm(temporary, { recursive: true, force: true });
-    }
-  }
+  if (manifest.ignored) await writeIgnoredFiles(cwd, manifest.ignored, input.signal);
   for (const entry of manifest.modes) {
     const target = path.join(cwd, entry.path);
     if (path.relative(cwd, target).startsWith("..")) throw new RestorePointRestoreFailure("invalid_payload");

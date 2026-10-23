@@ -273,6 +273,34 @@ describe("git restore points", () => {
       expect(await read(restored, "evidence/run.log")).toBe("newer local evidence\n");
     });
 
+    it("restores ignored files byte for byte despite line ending attributes", async () => {
+      await write(work, ".gitattributes", "* text=auto\n");
+      git(work, "add", ".gitattributes"); git(work, "commit", "-q", "-m", "normalize text");
+      git(work, "push", "-q", "origin", "HEAD:master");
+      await ignoredWork();
+      await write(work, "evidence/windows.txt", "line one\r\nline two\r\n");
+      const { manifest, payload } = (await captureRestorePoint({ cwd: work, upstreamCommits: upstream() }))!;
+      const restored = await freshClone("restored-crlf");
+      const imported = await importRestorePoint({ repositoryCwd: restored, payload });
+      await applyRestorePoint({ cwd: restored, manifest: imported });
+      expect(await fs.readFile(path.join(restored, "evidence/windows.txt"))).toEqual(Buffer.from("line one\r\nline two\r\n"));
+      expect(manifest.ignored).toBeDefined();
+    });
+
+    it("removes the files a failed restore wrote, so a retry succeeds", async () => {
+      await ignoredWork();
+      const { payload } = (await captureRestorePoint({ cwd: work, upstreamCommits: upstream() }))!;
+      const restored = await freshClone("restored-partial");
+      await fs.writeFile(path.join(restored, "ui"), "a file where a directory is needed\n");
+      const imported = await importRestorePoint({ repositoryCwd: restored, payload });
+      await expect(applyRestorePoint({ cwd: restored, manifest: imported })).rejects.toBeInstanceOf(RestorePointRestoreFailure);
+      await expect(fs.access(path.join(restored, "evidence/run.log"))).rejects.toMatchObject({ code: "ENOENT" });
+      await fs.rm(path.join(restored, "ui"));
+      await applyRestorePoint({ cwd: restored, manifest: imported });
+      expect(await read(restored, "evidence/run.log")).toBe("agent evidence\n");
+      expect(await read(restored, "ui/tsconfig.tsbuildinfo")).toBe("{\"version\":\"5\"}\n");
+    });
+
     it("skips an ignored nested repository", async () => {
       await ignoredWork();
       git(work, "init", "-q", path.join(work, "evidence/nested"));
