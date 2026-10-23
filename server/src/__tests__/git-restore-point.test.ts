@@ -197,6 +197,23 @@ describe("git restore points", () => {
       .rejects.toMatchObject({ reason: "restore_point_history_too_large" });
   });
 
+  it("refuses more preserved commits than the limit before checking each one", async () => {
+    const extra = Array.from({ length: 51 }, (_, index) => index.toString(16).padStart(40, "0"));
+    await expect(captureRestorePoint({ cwd: work, upstreamCommits: upstream(), preserveCommits: extra }))
+      .rejects.toMatchObject({ reason: "restore_point_history_too_large" });
+  });
+
+  it("saves preserved commits that exist and ignores ones that do not", async () => {
+    await write(work, "orphan.txt", "only reachable from a preserved commit\n");
+    git(work, "add", "orphan.txt"); git(work, "commit", "-q", "-m", "orphan");
+    const orphan = git(work, "rev-parse", "HEAD");
+    git(work, "reset", "-q", "--hard", "HEAD~1");
+    git(work, "reflog", "expire", "--expire=now", "--all");
+    const { manifest } = (await captureRestorePoint({ cwd: work, upstreamCommits: upstream(),
+      preserveCommits: [orphan, "f".repeat(40)] }))!;
+    expect(manifest.preserved).toEqual([orphan]);
+  });
+
   it("keeps capture objects out of the repository", async () => {
     await write(work, "notes/todo.md", "untracked work\n");
     const before = git(work, "count-objects", "-v");

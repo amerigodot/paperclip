@@ -229,8 +229,16 @@ async function existingCommits(cwd: string, commits: readonly string[], signal?:
   return present;
 }
 
+async function presentCommits(cwd: string, commits: readonly string[], signal?: AbortSignal) {
+  const unique = [...new Set(commits.filter((commit) => SHA.test(commit)))];
+  if (unique.length === 0) return [];
+  const output = await gitText(cwd, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], { signal, input: unique.join("\n") + "\n" });
+  return output.split("\n").map((line) => line.split(" ")).filter(([sha, type]) => SHA.test(sha ?? "") && type === "commit").map(([sha]) => sha!);
+}
+
 async function unpreservedHistory(cwd: string, head: string, boundary: readonly string[], signal?: AbortSignal, extra: readonly string[] = []) {
-  const candidates = new Set<string>(await existingCommits(cwd, extra, signal));
+  if (new Set(extra).size > MAX_PRESERVED_COMMITS) throw new RestorePointSkip("restore_point_history_too_large");
+  const candidates = new Set<string>(await presentCommits(cwd, extra, signal));
   const reflog = await gitText(cwd, ["reflog", "show", "--format=%H", "HEAD"], { signal }).catch(() => "");
   for (const line of reflog.split("\n")) if (SHA.test(line)) candidates.add(line);
   const original = await gitText(cwd, ["rev-parse", "--verify", "-q", "ORIG_HEAD^{commit}"], { signal }).catch(() => "");
