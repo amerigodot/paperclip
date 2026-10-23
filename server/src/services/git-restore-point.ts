@@ -453,6 +453,8 @@ export async function restorePointHistoryDigest(input: string, signal?: AbortSig
   const reflog = await gitText(cwd, ["reflog", "show", "--format=%H", "HEAD"], { signal }).catch(() => "");
   const original = await gitText(cwd, ["rev-parse", "--verify", "-q", "ORIG_HEAD^{commit}"], { signal }).catch(() => "");
   const remotes = await gitText(cwd, ["for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes"], { signal }).catch(() => "");
+  const remoteReflogs = (await gitText(cwd, ["reflog", "show", "--all", "--format=%H %gD"], { signal }).catch(() => ""))
+    .split("\n").filter((line) => / refs\/remotes\//.test(line));
   return createHash("sha256").update(JSON.stringify([reflog.split("\n").filter((line) => SHA.test(line)), SHA.test(original) ? original : null,
-    remotes.split("\n").filter(Boolean)])).digest("hex");
+    remotes.split("\n").filter(Boolean), remoteReflogs])).digest("hex");
 }
