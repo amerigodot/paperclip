@@ -1948,7 +1948,6 @@ export class PaperclipRunnerToolAuthority {
       readRemoteTaskFile: this.binding.readRemoteTaskFile,
     } as const;
     const prior = record(record(current.run.resultJson).semanticToolReceipts)[idempotencyKey];
-    // Provider reads can call back into Core for agent state. Hold no mutation locks here.
     const verifiedFile = prior === undefined ? await readVerifiedWorkspaceFile(fileBinding, {
       filename: typeof input.filename === "string" ? input.filename : "",
       contentType: typeof input.contentType === "string" ? input.contentType : "",
