@@ -6,10 +6,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
 import type { StoredSecretVersionMaterial } from "../secrets/types.js";
+import { REGENERABLE_WORKSPACE_DIR_NAMES } from "./workspace-compaction.js";
 
 const execFile = promisify(execFileCallback);
 
 export const RESTORE_POINT_PAYLOAD_SCHEMA = "paperclip.git-restore-point-payload.v1";
+export const RESTORE_POINT_PAYLOAD_SCHEMA_V2 = "paperclip.git-restore-point-payload.v2";
 const PAYLOAD_MAGIC = Buffer.from("PCRP-PLAIN1\n");
 const SEALED_MAGIC = Buffer.from("PCRP1");
 const KEY_SCHEMA = "paperclip.git-restore-point-key.v1";
@@ -42,16 +44,30 @@ export const DEFAULT_RESTORE_POINT_LIMITS: RestorePointLimits = {
 };
 
 export type RestorePointManifest = {
-  schema: typeof RESTORE_POINT_PAYLOAD_SCHEMA;
+  schema: typeof RESTORE_POINT_PAYLOAD_SCHEMA | typeof RESTORE_POINT_PAYLOAD_SCHEMA_V2;
   head: string;
   index: string | null;
   worktree: string | null;
+  ignored?: string;
   preserved: string[];
   prerequisites: string[];
   modes: Array<{ path: string; mode: number }>;
 };
 
-export type RestorePointSnapshot = { head: string; index: string | null; worktree: string | null; modes: Array<{ path: string; mode: number }> };
+export type RestorePointSnapshot = { head: string; index: string | null; worktree: string | null; ignored: string | null;
+  modes: Array<{ path: string; mode: number }> };
+
+export function restorePointSavesIgnoredFile(file: string) {
+  const parts = file.split("/").filter(Boolean);
+  if (parts.length === 0 || /^\.env(\..*)?$/.test(parts[parts.length - 1]!)) return false;
+  if (parts[0] === ".paperclip-repositories" || file === ".claude/settings.local.json") return false;
+  return !parts.slice(0, -1).some(part => REGENERABLE_WORKSPACE_DIR_NAMES.has(part));
+}
+
+async function savedIgnoredFiles(cwd: string, signal?: AbortSignal) {
+  return nulList(await git(cwd, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"], { signal }))
+    .filter(restorePointSavesIgnoredFile).sort();
+}
 
 export type RestorePointIdentity = { companyId: string; workspaceId: string; restorePointId: string; generation: number };
 
@@ -144,6 +160,7 @@ async function scanChangedPaths(cwd: string, limits: RestorePointLimits, signal?
     ...nulList(await git(cwd, ["ls-files", "-z", "--modified"], { signal })),
     ...nulList(await git(cwd, ["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD"], { signal })),
     ...nulList(await git(cwd, ["ls-files", "-z", "--others", "--exclude-standard", "--", ".", ...EXCLUDED_UNTRACKED], { signal })),
+    ...await savedIgnoredFiles(cwd, signal),
   ]);
   if (changed.size > limits.maxFiles) throw new RestorePointSkip("restore_point_too_large");
   let totalBytes = 0;
@@ -187,17 +204,27 @@ async function snapshotTrees(cwd: string, env: Record<string, string>, temporary
   const worktreeTree = await gitText(cwd, ["write-tree"], { env: worktreeEnv, signal });
   const gitlinks = await gitText(cwd, ["ls-tree", "-r", worktreeTree], { env, signal });
   if (/^160000 /m.test(gitlinks)) throw new RestorePointSkip("submodules_unsupported");
-  return { indexTree, worktreeTree };
+  const ignoredFiles = await savedIgnoredFiles(cwd, signal);
+  let ignoredTree: string | null = null;
+  if (ignoredFiles.length > 0) {
+    const ignoredEnv = { ...env, GIT_INDEX_FILE: path.join(temporary, "ignored-index"), GIT_LITERAL_PATHSPECS: "1" };
+    await git(cwd, ["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], { env: ignoredEnv, signal, input: ignoredFiles.join("\0") });
+    ignoredTree = await gitText(cwd, ["write-tree"], { env: ignoredEnv, signal });
+    if (/^160000 /m.test(await gitText(cwd, ["ls-tree", "-r", ignoredTree], { env, signal }))) throw new RestorePointSkip("untracked_nested_repository");
+  }
+  return { indexTree, worktreeTree, ignoredTree };
 }
 
 async function snapshotCommits(cwd: string, env: Record<string, string>, temporary: string, modes: RestorePointSnapshot["modes"], signal?: AbortSignal): Promise<RestorePointSnapshot> {
   const head = await gitText(cwd, ["rev-parse", "--verify", "HEAD^{commit}"], { signal });
   const headTree = await gitText(cwd, ["rev-parse", "HEAD^{tree}"], { signal });
-  const { indexTree, worktreeTree } = await snapshotTrees(cwd, env, temporary, signal);
-  if (indexTree === headTree && worktreeTree === headTree) return { head, index: null, worktree: null, modes: [] };
+  const { indexTree, worktreeTree, ignoredTree } = await snapshotTrees(cwd, env, temporary, signal);
+  const ignored = ignoredTree
+    ? await gitText(cwd, ["commit-tree", ignoredTree, "-p", head, "-m", "paperclip restore point ignored files"], { env, signal }) : null;
+  if (indexTree === headTree && worktreeTree === headTree) return { head, index: null, worktree: null, ignored, modes: ignored ? modes : [] };
   const index = await gitText(cwd, ["commit-tree", indexTree, "-p", head, "-m", "paperclip restore point index"], { env, signal });
   const worktree = await gitText(cwd, ["commit-tree", worktreeTree, "-p", head, "-p", index, "-m", "paperclip restore point worktree"], { env, signal });
-  return { head, index, worktree, modes };
+  return { head, index, worktree, ignored, modes };
 }
 
 const UNBOUNDED_LIMITS: RestorePointLimits = {
@@ -268,8 +295,10 @@ export function decodeRestorePointPayload(payload: Buffer): { manifest: RestoreP
   if (start + length > payload.length) throw new RestorePointRestoreFailure("invalid_payload");
   const manifest = JSON.parse(payload.subarray(start, start + length).toString("utf8")) as RestorePointManifest;
   const shas = [manifest.head, ...(manifest.index ? [manifest.index] : []), ...(manifest.worktree ? [manifest.worktree] : []),
-    ...manifest.preserved, ...manifest.prerequisites];
-  if (manifest.schema !== RESTORE_POINT_PAYLOAD_SCHEMA || shas.some((sha) => !SHA.test(sha))
+    ...(manifest.ignored !== undefined ? [manifest.ignored] : []), ...manifest.preserved, ...manifest.prerequisites];
+  const schemaValid = manifest.schema === RESTORE_POINT_PAYLOAD_SCHEMA ? manifest.ignored === undefined
+    : manifest.schema === RESTORE_POINT_PAYLOAD_SCHEMA_V2 && typeof manifest.ignored === "string";
+  if (!schemaValid || shas.some((sha) => typeof sha !== "string" || !SHA.test(sha))
     || (manifest.index === null) !== (manifest.worktree === null)
     || manifest.modes.some((entry) => typeof entry.path !== "string" || path.isAbsolute(entry.path)
       || entry.path.split("/").includes("..") || !Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o777)) {
@@ -299,9 +328,10 @@ export async function captureRestorePoint(input: {
       }
       return false;
     })();
-    if (headOnUpstream && snapshot.worktree === null && preserved.length === 0) return null;
+    if (headOnUpstream && snapshot.worktree === null && snapshot.ignored === null && preserved.length === 0) return null;
     const refs: Array<[string, string]> = [["refs/restore/head", snapshot.head]];
     if (snapshot.index && snapshot.worktree) refs.push(["refs/restore/index", snapshot.index], ["refs/restore/worktree", snapshot.worktree]);
+    if (snapshot.ignored) refs.push(["refs/restore/ignored", snapshot.ignored]);
     preserved.forEach((commit, index) => refs.push([`refs/restore/preserved/${index}`, commit]));
     for (const [ref, commit] of refs) await git(store, ["update-ref", ref, commit], { env, signal: input.signal });
     const exclusions = boundary.map((commit) => `^${commit}`);
@@ -316,10 +346,11 @@ export async function captureRestorePoint(input: {
     if (bundle.length > limits.maxBundleBytes) throw new RestorePointSkip("restore_point_too_large");
     const prerequisites = bundlePrerequisites(bundle);
     const manifest: RestorePointManifest = {
-      schema: RESTORE_POINT_PAYLOAD_SCHEMA,
+      schema: snapshot.ignored ? RESTORE_POINT_PAYLOAD_SCHEMA_V2 : RESTORE_POINT_PAYLOAD_SCHEMA,
       head: snapshot.head,
       index: snapshot.index,
       worktree: snapshot.worktree,
+      ...(snapshot.ignored ? { ignored: snapshot.ignored } : {}),
       preserved,
       prerequisites,
       modes: snapshot.modes,
@@ -345,6 +376,7 @@ export async function importRestorePoint(input: { repositoryCwd: string; payload
       expected.set("refs/restore/index", manifest.index);
       expected.set("refs/restore/worktree", manifest.worktree);
     }
+    if (manifest.ignored) expected.set("refs/restore/ignored", manifest.ignored);
     manifest.preserved.forEach((commit, index) => expected.set(`refs/restore/preserved/${index}`, commit));
     if (heads.some(([sha, ref]) => expected.get(ref ?? "") !== sha)) throw new RestorePointRestoreFailure("bundle_manifest_mismatch");
     const listed = new Set(heads.map(([, ref]) => ref));
@@ -375,6 +407,17 @@ export async function applyRestorePoint(input: { cwd: string; manifest: RestoreP
     if (diff.length > 0) await git(cwd, ["apply", "--binary", "--whitespace=nowarn", "-"], { input: diff, signal: input.signal });
     await git(cwd, ["read-tree", `${manifest.index}^{tree}`], { signal: input.signal });
   }
+  if (manifest.ignored) {
+    const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-restore-point-"));
+    try {
+      const ignoredEnv = { GIT_INDEX_FILE: path.join(temporary, "ignored-index") };
+      await git(cwd, ["read-tree", `${manifest.ignored}^{tree}`], { env: ignoredEnv, signal: input.signal });
+      await git(cwd, ["checkout-index", "-a"], { env: ignoredEnv, signal: input.signal })
+        .catch(() => { throw new RestorePointRestoreFailure("ignored_files_conflict"); });
+    } finally {
+      await fs.rm(temporary, { recursive: true, force: true });
+    }
+  }
   for (const entry of manifest.modes) {
     const target = path.join(cwd, entry.path);
     if (path.relative(cwd, target).startsWith("..")) throw new RestorePointRestoreFailure("invalid_payload");
@@ -383,7 +426,7 @@ export async function applyRestorePoint(input: { cwd: string; manifest: RestoreP
   }
   const restored = await currentRestorePointSnapshot(cwd, input.signal);
   if (restored.head !== manifest.head || restored.index !== manifest.index || restored.worktree !== manifest.worktree
-    || JSON.stringify(restored.modes) !== JSON.stringify(manifest.modes)) {
+    || restored.ignored !== (manifest.ignored ?? null) || JSON.stringify(restored.modes) !== JSON.stringify(manifest.modes)) {
     throw new RestorePointRestoreFailure("restored_contents_mismatch");
   }
 }

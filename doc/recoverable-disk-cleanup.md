@@ -114,8 +114,15 @@ Before removal it saves a restore point:
 - a git bundle of commits the remote does not have, against a remote-verified base,
   including commits only reachable from the reflog or `ORIG_HEAD`;
 - deterministic snapshots of the index and working tree, including untracked files and
-  non-default file modes. Ignored files are left out, and so are untracked `.env` and
-  `.env.*` files, which provisioning recreates with current secrets.
+  non-default file modes. Untracked `.env` and `.env.*` files are left out, because
+  provisioning recreates them with current secrets;
+- a separate snapshot of ignored files, such as build caches or files an agent kept out of
+  git. It leaves out `.env` files, nested `.paperclip-repositories` checkouts (they get their
+  own restore points), `.claude/settings.local.json` (saved with the workspace contents)
+  and anything inside a regenerable directory such as `node_modules` or `dist`. A
+  restore point with ignored files uses payload schema `v2`, which older servers reject
+  instead of restoring without them. Restoring never overwrites an ignored file that already
+  exists, and an ignored nested repository keeps the worktree.
 
 The restore point is encrypted with a per-restore-point key wrapped by the instance
 secrets key, uploaded to file storage, read back and hash-checked, then activated in

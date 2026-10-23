@@ -1,3 +1,4 @@
+import { restorePointSavesIgnoredFile } from "./git-restore-point.js";
 import { validateGitWorkspaceContents, type GitWorkspaceContents } from "./git-workspace-contents.js";
 import { recoverGitExpirationLocks, type GitExpirationLockLocation } from "./git-workspace-expiration-locks.js";
 import fs from "node:fs/promises";
@@ -390,7 +391,7 @@ export async function assertReproducibleGitFiles(cwd: string, signal?: AbortSign
   const regenerable = await findRegenerableWorkspaceDirs(cwd, { signal });
   const ignored = (await gitCacheCommand(cwd, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], signal)).split("\0").filter(Boolean);
   const unexplained = ignored.filter(file => !(options.preserveSettings && file === PAPERCLIP_CLAUDE_SETTINGS_FILE) && !regenerable.some(dir => file.startsWith(`${dir}/`))
-    && !(options.restorePoint && /^\.env(\..*)?$/.test(path.posix.basename(file))));
+    && !(options.restorePoint && (/^\.env(\..*)?$/.test(path.posix.basename(file)) || restorePointSavesIgnoredFile(file))));
   const checkouts = new Set<string>();
   for (const file of unexplained) {
     const [namespace, name, rest] = file.split("/", 3);
