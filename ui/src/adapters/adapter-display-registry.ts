@@ -18,6 +18,7 @@ import {
   Cpu,
 } from "lucide-react";
 import { OpenCodeLogoIcon } from "@/components/OpenCodeLogoIcon";
+import { OmnIALogoIcon } from "@/components/OmnIALogoIcon";
 
 // ---------------------------------------------------------------------------
 // Type suffix parsing
@@ -69,6 +70,12 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     comingSoon: true,
     disabledLabel: "Use Claude Code or Codex with the ACP engine",
     hideFromVisualSelection: true,
+  },
+  ollama_local: {
+    label: "OmnIA",
+    description: "OmnIA Sovereign Local AI Engine",
+    icon: OmnIALogoIcon,
+    recommended: true,
   },
   claude_local: {
     label: "Claude Code",

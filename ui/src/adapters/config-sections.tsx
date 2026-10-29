@@ -34,6 +34,7 @@ export function configFieldsForSection(
 }
 
 export function schemaFieldSection(key: string): AdapterConfigSection {
+  if (key.startsWith("omnia_") || key.startsWith("omnia")) return "configuration";
   if (["model", "provider"].includes(key)) return "adapter";
   if (["command", "agentCommand", "args", "extraArgs"].includes(key))
     return "advanced";
