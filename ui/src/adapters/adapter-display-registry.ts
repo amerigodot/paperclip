@@ -71,11 +71,16 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     disabledLabel: "Use Claude Code or Codex with the ACP engine",
     hideFromVisualSelection: true,
   },
-  ollama_local: {
+  omnia: {
     label: "OmnIA",
     description: "OmnIA Sovereign Local AI Engine",
     icon: OmnIALogoIcon,
     recommended: true,
+  },
+  ollama_local: {
+    label: "OmnIA",
+    description: "OmnIA Sovereign Local AI Engine",
+    icon: OmnIALogoIcon,
   },
   claude_local: {
     label: "Claude Code",
