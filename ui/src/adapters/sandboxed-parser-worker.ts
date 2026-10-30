@@ -43,25 +43,35 @@ const WORKER_BOOTSTRAP = `
 
 const _undefined = void 0;
 
+function safeNullify(target: any, prop: string) {
+  try {
+    target[prop] = _undefined;
+  } catch {
+    try {
+      Object.defineProperty(target, prop, { value: _undefined, writable: false, configurable: true });
+    } catch {}
+  }
+}
+
 // Network
-self.fetch = _undefined;
-self.XMLHttpRequest = _undefined;
-self.WebSocket = _undefined;
-self.EventSource = _undefined;
-self.RTCPeerConnection = _undefined;
-self.RTCDataChannel = _undefined;
-self.Request = _undefined;
-self.Response = _undefined;
-self.Headers = _undefined;
-self.Cache = _undefined;
-self.CacheStorage = _undefined;
-self.caches = _undefined;
+safeNullify(self, "fetch");
+safeNullify(self, "XMLHttpRequest");
+safeNullify(self, "WebSocket");
+safeNullify(self, "EventSource");
+safeNullify(self, "RTCPeerConnection");
+safeNullify(self, "RTCDataChannel");
+safeNullify(self, "Request");
+safeNullify(self, "Response");
+safeNullify(self, "Headers");
+safeNullify(self, "Cache");
+safeNullify(self, "CacheStorage");
+safeNullify(self, "caches");
 
 // Import / eval escape hatches
-self.importScripts = _undefined;
-self.Worker = _undefined;
-self.SharedWorker = _undefined;
-self.Blob = _undefined;
+safeNullify(self, "importScripts");
+safeNullify(self, "Worker");
+safeNullify(self, "SharedWorker");
+safeNullify(self, "Blob");
 if (self.URL) {
   try { Object.defineProperty(self.URL, "createObjectURL", { value: _undefined, writable: false, configurable: false }); } catch {}
   try { Object.defineProperty(self.URL, "revokeObjectURL", { value: _undefined, writable: false, configurable: false }); } catch {}
