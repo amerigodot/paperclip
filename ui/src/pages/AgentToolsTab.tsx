@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import YAML from "yaml";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HelpCircle, PackageCheck, Wrench } from "lucide-react";
+import { HelpCircle, PackageCheck, Plus, Trash2, Wrench } from "lucide-react";
 import type {
   AgentDetail as AgentDetailRecord,
   ConnectionGrant,
@@ -15,6 +15,16 @@ import { toolsApi } from "../api/tools";
 import { agentsApi } from "../api/agents";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { GithubIcon } from "@/components/icons/github-icon";
 import { InlineBanner } from "@/components/InlineBanner";
 import { EnforcementBanner } from "../components/EnforcementBanner";
@@ -367,6 +377,28 @@ export const DEFAULT_AGENT_TOOL_DEFS = [
   },
 ];
 
+export interface AgentDedicatedToolItem {
+  name: string;
+  label: string;
+  description: string;
+  type: string;
+  isReadOnly?: boolean;
+  riskLevel?: "low" | "medium" | "high";
+  enabled: boolean;
+  isCustom?: boolean;
+  access?: {
+    url?: string;
+    baseUrl?: string;
+    allowedMethods?: string[];
+  };
+  auth?: {
+    type?: string;
+    tokenEnv?: string;
+    keyEnv?: string;
+    headerName?: string;
+  };
+}
+
 function AgentDedicatedToolsSection({
   agent,
   companyId,
@@ -377,16 +409,13 @@ function AgentDedicatedToolsSection({
   const queryClient = useQueryClient();
   const adapterConfig = (agent.adapterConfig ?? {}) as Record<string, unknown>;
 
-  const currentToolsMap = useMemo(() => {
+  const initialTools = useMemo<AgentDedicatedToolItem[]>(() => {
     const raw = adapterConfig.omnia_tools ?? adapterConfig.tools;
-    const map: Record<string, boolean> = {
-      git_intelligence: true,
-      save_artifact: true,
-      ip_location: true,
-      call_api_endpoint: true,
-      query_graphql: true,
-      inspect_api_documentation: true,
-    };
+    const baseTools: AgentDedicatedToolItem[] = DEFAULT_AGENT_TOOL_DEFS.map((t) => ({
+      ...t,
+      enabled: true,
+      isCustom: false,
+    }));
 
     if (typeof raw === "string" && raw.trim()) {
       try {
@@ -397,46 +426,96 @@ function AgentDedicatedToolsSection({
             ? parsed.tools
             : null;
         if (list) {
+          const enabledMap: Record<string, boolean> = {};
+          const customList: AgentDedicatedToolItem[] = [];
+
           for (const item of list) {
             if (item && item.name) {
-              map[item.name] = item.enabled !== false && String(item.enabled) !== "false";
+              const isBase = baseTools.some((bt) => bt.name === item.name);
+              const isEnabled = item.enabled !== false && String(item.enabled) !== "false";
+              if (isBase) {
+                enabledMap[item.name] = isEnabled;
+              } else {
+                customList.push({
+                  name: item.name,
+                  label: item.label || item.name,
+                  description: item.description || "Custom agent tool",
+                  type: item.type || "http_request",
+                  isReadOnly: item.isReadOnly ?? (item.access?.allowedMethods?.length === 1 && item.access.allowedMethods[0] === "GET"),
+                  riskLevel: item.riskLevel || "medium",
+                  enabled: isEnabled,
+                  isCustom: true,
+                  access: item.access,
+                  auth: item.auth,
+                });
+              }
             }
           }
+
+          return [
+            ...baseTools.map((bt) => ({
+              ...bt,
+              enabled: enabledMap[bt.name] ?? true,
+            })),
+            ...customList,
+          ];
         }
       } catch {
         // fallback
       }
     }
-    return map;
+    return baseTools;
   }, [adapterConfig.omnia_tools, adapterConfig.tools]);
 
-  const [draftEnabled, setDraftEnabled] = useState<Record<string, boolean>>(currentToolsMap);
+  const [toolsList, setToolsList] = useState<AgentDedicatedToolItem[]>(initialTools);
   const [omniaMode, setOmniaMode] = useState<string>(
     typeof adapterConfig.omnia_mode === "string" ? adapterConfig.omnia_mode : "permissive",
   );
 
+  // Add Tool Dialog state
+  const [isAddOpen, setIsAddOpen] = useState(false);
+  const [newToolName, setNewToolName] = useState("");
+  const [newToolLabel, setNewToolLabel] = useState("");
+  const [newToolDescription, setNewToolDescription] = useState("");
+  const [newToolType, setNewToolType] = useState<string>("http_request");
+  const [newToolUrl, setNewToolUrl] = useState("");
+  const [newToolMethods, setNewToolMethods] = useState<string[]>(["GET"]);
+  const [newToolAuthType, setNewToolAuthType] = useState<string>("none");
+  const [newToolTokenEnv, setNewToolTokenEnv] = useState("");
+  const [newToolKeyEnv, setNewToolKeyEnv] = useState("");
+  const [newToolRisk, setNewToolRisk] = useState<"low" | "medium" | "high">("medium");
+  const [newToolReadOnly, setNewToolReadOnly] = useState(false);
+  const [addError, setAddError] = useState("");
+
   useEffect(() => {
-    setDraftEnabled(currentToolsMap);
+    setToolsList(initialTools);
     if (typeof adapterConfig.omnia_mode === "string") {
       setOmniaMode(adapterConfig.omnia_mode);
     }
-  }, [currentToolsMap, adapterConfig.omnia_mode]);
+  }, [initialTools, adapterConfig.omnia_mode]);
 
   const updateMutation = useMutation({
     mutationFn: async ({
-      updatedMap,
+      updatedTools,
       mode,
     }: {
-      updatedMap: Record<string, boolean>;
+      updatedTools: AgentDedicatedToolItem[];
       mode: string;
     }) => {
-      const toolsToSave = DEFAULT_AGENT_TOOL_DEFS.map((tool) => ({
-        name: tool.name,
-        label: tool.label,
-        description: tool.description,
-        type: tool.type,
-        enabled: updatedMap[tool.name] ?? true,
-      }));
+      const toolsToSave = updatedTools.map((tool) => {
+        const item: Record<string, unknown> = {
+          name: tool.name,
+          label: tool.label,
+          description: tool.description,
+          type: tool.type,
+          enabled: tool.enabled,
+        };
+        if (tool.isReadOnly !== undefined) item.isReadOnly = tool.isReadOnly;
+        if (tool.riskLevel) item.riskLevel = tool.riskLevel;
+        if (tool.access) item.access = tool.access;
+        if (tool.auth) item.auth = tool.auth;
+        return item;
+      });
 
       const newConfig = {
         ...adapterConfig,
@@ -455,14 +534,76 @@ function AgentDedicatedToolsSection({
   });
 
   const handleToggle = (toolName: string, enabled: boolean) => {
-    const nextMap = { ...draftEnabled, [toolName]: enabled };
-    setDraftEnabled(nextMap);
-    updateMutation.mutate({ updatedMap: nextMap, mode: omniaMode });
+    const nextList = toolsList.map((t) => (t.name === toolName ? { ...t, enabled } : t));
+    setToolsList(nextList);
+    updateMutation.mutate({ updatedTools: nextList, mode: omniaMode });
+  };
+
+  const handleDeleteTool = (toolName: string) => {
+    const nextList = toolsList.filter((t) => t.name !== toolName);
+    setToolsList(nextList);
+    updateMutation.mutate({ updatedTools: nextList, mode: omniaMode });
   };
 
   const handleModeChange = (mode: string) => {
     setOmniaMode(mode);
-    updateMutation.mutate({ updatedMap: draftEnabled, mode });
+    updateMutation.mutate({ updatedTools: toolsList, mode });
+  };
+
+  const handleAddToolSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = newToolName.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_");
+    if (!cleanName) {
+      setAddError("Tool name is required (use letters, numbers, and underscores).");
+      return;
+    }
+    if (toolsList.some((t) => t.name === cleanName)) {
+      setAddError(`A tool with name "${cleanName}" already exists.`);
+      return;
+    }
+
+    const createdTool: AgentDedicatedToolItem = {
+      name: cleanName,
+      label: newToolLabel.trim() || cleanName,
+      description: newToolDescription.trim() || `Custom tool for ${cleanName}`,
+      type: newToolType,
+      isReadOnly: newToolReadOnly || (newToolMethods.length === 1 && newToolMethods[0] === "GET"),
+      riskLevel: newToolRisk,
+      enabled: true,
+      isCustom: true,
+      ...(newToolUrl.trim()
+        ? {
+            access: {
+              url: newToolUrl.trim(),
+              allowedMethods: newToolMethods.length ? newToolMethods : ["GET"],
+            },
+          }
+        : {}),
+      ...(newToolAuthType !== "none"
+        ? {
+            auth: {
+              type: newToolAuthType,
+              tokenEnv: newToolTokenEnv.trim() || undefined,
+              keyEnv: newToolKeyEnv.trim() || undefined,
+            },
+          }
+        : {}),
+    };
+
+    const nextList = [...toolsList, createdTool];
+    setToolsList(nextList);
+    updateMutation.mutate({ updatedTools: nextList, mode: omniaMode });
+
+    setIsAddOpen(false);
+    setNewToolName("");
+    setNewToolLabel("");
+    setNewToolDescription("");
+    setNewToolUrl("");
+    setNewToolMethods(["GET"]);
+    setNewToolAuthType("none");
+    setNewToolTokenEnv("");
+    setNewToolKeyEnv("");
+    setAddError("");
   };
 
   return (
@@ -485,6 +626,16 @@ function AgentDedicatedToolsSection({
           ) : (
             <span className="text-xs text-muted-foreground">Saved</span>
           )}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => setIsAddOpen(true)}
+            className="h-7 gap-1 text-xs"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>Add Tool</span>
+          </Button>
         </div>
       </div>
 
@@ -511,8 +662,8 @@ function AgentDedicatedToolsSection({
         </div>
 
         <div className="divide-y divide-border rounded-md border border-border">
-          {DEFAULT_AGENT_TOOL_DEFS.map((tool) => {
-            const isChecked = draftEnabled[tool.name] ?? true;
+          {toolsList.map((tool) => {
+            const isChecked = tool.enabled;
             return (
               <div key={tool.name} className="flex items-start justify-between gap-3 px-3 py-2.5">
                 <label className="flex items-start gap-3 flex-1 cursor-pointer">
@@ -526,8 +677,24 @@ function AgentDedicatedToolsSection({
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-mono font-medium text-foreground">{tool.name}</span>
                       <span className="text-xs text-muted-foreground">({tool.label})</span>
+                      {tool.isCustom && (
+                        <span className="rounded bg-primary/10 border border-primary/20 px-1.5 py-0.2 text-(length:--text-nano) font-medium text-primary">
+                          Custom
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-muted-foreground">{tool.description}</p>
+                    {tool.access?.url && (
+                      <div className="flex items-center gap-1.5 pt-0.5 font-mono text-(length:--text-nano) text-muted-foreground">
+                        <span className="rounded bg-muted px-1 py-0.2 font-semibold">
+                          {tool.access.allowedMethods?.join(", ") ?? "GET"}
+                        </span>
+                        <span className="truncate max-w-sm">{tool.access.url}</span>
+                        {tool.auth?.type && tool.auth.type !== "none" && (
+                          <span className="text-primary font-medium">({tool.auth.type} auth)</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </label>
                 <div className="flex items-center gap-2 shrink-0 pt-0.5">
@@ -537,12 +704,244 @@ function AgentDedicatedToolsSection({
                     isDestructive={false}
                   />
                   <RiskBadge risk={tool.riskLevel} />
+                  {tool.isCustom && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTool(tool.name)}
+                      aria-label={`Delete custom tool ${tool.name}`}
+                      className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      title="Delete custom tool"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
             );
           })}
         </div>
+
+        <div className="flex justify-end pt-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => setIsAddOpen(true)}
+            className="h-7 gap-1 text-xs"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>Add Custom Tool</span>
+          </Button>
+        </div>
       </div>
+
+      {/* Add Custom Tool Dialog */}
+      <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add Custom Tool to {agent.name}</DialogTitle>
+            <DialogDescription>
+              Define a custom REST API endpoint, GraphQL client, or schema inspector for this agent.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleAddToolSubmit} className="space-y-4 py-2">
+            {addError && (
+              <div className="rounded-md bg-destructive/10 p-2 text-xs text-destructive">
+                {addError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="newToolName" className="text-xs font-semibold">
+                  Tool Name (Identifier) *
+                </Label>
+                <Input
+                  id="newToolName"
+                  value={newToolName}
+                  onChange={(e) => setNewToolName(e.target.value)}
+                  placeholder="e.g. github_issues"
+                  className="font-mono text-xs"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="newToolLabel" className="text-xs font-semibold">
+                  Display Label
+                </Label>
+                <Input
+                  id="newToolLabel"
+                  value={newToolLabel}
+                  onChange={(e) => setNewToolLabel(e.target.value)}
+                  placeholder="e.g. GitHub Issues Reader"
+                  className="text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="newToolDescription" className="text-xs font-semibold">
+                Tool Description (LLM Guidance) *
+              </Label>
+              <textarea
+                id="newToolDescription"
+                value={newToolDescription}
+                onChange={(e) => setNewToolDescription(e.target.value)}
+                placeholder="Describe what this tool does and when the agent should invoke it..."
+                rows={2}
+                className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                required
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="newToolType" className="text-xs font-semibold">
+                  Tool Type
+                </Label>
+                <select
+                  id="newToolType"
+                  value={newToolType}
+                  onChange={(e) => setNewToolType(e.target.value)}
+                  className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs shadow-xs"
+                >
+                  <option value="http_request">REST API Endpoint (HTTP)</option>
+                  <option value="graphql">GraphQL Client</option>
+                  <option value="inspect_api">API Schema Documentation</option>
+                  <option value="custom">Custom Tool</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="newToolRisk" className="text-xs font-semibold">
+                  Risk Level
+                </Label>
+                <select
+                  id="newToolRisk"
+                  value={newToolRisk}
+                  onChange={(e) => setNewToolRisk(e.target.value as "low" | "medium" | "high")}
+                  className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs shadow-xs"
+                >
+                  <option value="low">Low (Safe / Read-only)</option>
+                  <option value="medium">Medium (API calls / Queries)</option>
+                  <option value="high">High (Destructive / Mutation)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="newToolUrl" className="text-xs font-semibold">
+                Target Endpoint URL (Optional)
+              </Label>
+              <Input
+                id="newToolUrl"
+                value={newToolUrl}
+                onChange={(e) => setNewToolUrl(e.target.value)}
+                placeholder="https://api.github.com/repos/org/repo/issues"
+                className="font-mono text-xs"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-semibold">Allowed HTTP Methods</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => {
+                  const isChecked = newToolMethods.includes(method);
+                  return (
+                    <button
+                      key={method}
+                      type="button"
+                      onClick={() => {
+                        setNewToolMethods((prev) =>
+                          isChecked ? prev.filter((m) => m !== method) : [...prev, method]
+                        );
+                      }}
+                      className={cn(
+                        "rounded px-2 py-0.5 font-mono text-xs transition-colors",
+                        isChecked
+                          ? "bg-primary text-primary-foreground font-semibold"
+                          : "border border-border text-muted-foreground hover:bg-muted"
+                      )}
+                    >
+                      {method}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="newToolAuthType" className="text-xs font-semibold">
+                  Authentication
+                </Label>
+                <select
+                  id="newToolAuthType"
+                  value={newToolAuthType}
+                  onChange={(e) => setNewToolAuthType(e.target.value)}
+                  className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs shadow-xs"
+                >
+                  <option value="none">None (Public)</option>
+                  <option value="bearer">Bearer Token</option>
+                  <option value="api_key">API Key Header</option>
+                </select>
+              </div>
+
+              {newToolAuthType === "bearer" && (
+                <div className="space-y-1">
+                  <Label htmlFor="newToolTokenEnv" className="text-xs font-semibold">
+                    Token Env Variable
+                  </Label>
+                  <Input
+                    id="newToolTokenEnv"
+                    value={newToolTokenEnv}
+                    onChange={(e) => setNewToolTokenEnv(e.target.value)}
+                    placeholder="e.g. GITHUB_TOKEN"
+                    className="font-mono text-xs"
+                  />
+                </div>
+              )}
+
+              {newToolAuthType === "api_key" && (
+                <div className="space-y-1">
+                  <Label htmlFor="newToolKeyEnv" className="text-xs font-semibold">
+                    Key Env Variable
+                  </Label>
+                  <Input
+                    id="newToolKeyEnv"
+                    value={newToolKeyEnv}
+                    onChange={(e) => setNewToolKeyEnv(e.target.value)}
+                    placeholder="e.g. API_KEY"
+                    className="font-mono text-xs"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <Checkbox
+                id="newToolReadOnly"
+                checked={newToolReadOnly}
+                onCheckedChange={(checked) => setNewToolReadOnly(Boolean(checked))}
+              />
+              <Label htmlFor="newToolReadOnly" className="text-xs cursor-pointer font-normal">
+                Mark tool as Read-Only
+              </Label>
+            </div>
+
+            <DialogFooter className="pt-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setIsAddOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" disabled={updateMutation.isPending}>
+                {updateMutation.isPending ? "Adding..." : "Add Tool"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -743,10 +1142,11 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
     if (isOmnia) {
       const config = (agent.adapterConfig ?? {}) as Record<string, unknown>;
       const raw = config.omnia_tools ?? config.tools;
-      const enabledMap: Record<string, boolean> = {};
-      for (const t of DEFAULT_AGENT_TOOL_DEFS) {
-        enabledMap[t.name] = true;
-      }
+      const allTools: AgentDedicatedToolItem[] = DEFAULT_AGENT_TOOL_DEFS.map((t) => ({
+        ...t,
+        enabled: true,
+        isCustom: false,
+      }));
 
       if (typeof raw === "string" && raw.trim()) {
         try {
@@ -759,7 +1159,24 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
           if (list) {
             for (const item of list) {
               if (item && item.name) {
-                enabledMap[item.name] = item.enabled !== false && String(item.enabled) !== "false";
+                const existing = allTools.find((t) => t.name === item.name);
+                const isEnabled = item.enabled !== false && String(item.enabled) !== "false";
+                if (existing) {
+                  existing.enabled = isEnabled;
+                } else {
+                  allTools.push({
+                    name: item.name,
+                    label: item.label || item.name,
+                    description: item.description || "Custom agent tool",
+                    type: item.type || "http_request",
+                    isReadOnly: item.isReadOnly ?? (item.access?.allowedMethods?.length === 1 && item.access.allowedMethods[0] === "GET"),
+                    riskLevel: item.riskLevel || "medium",
+                    enabled: isEnabled,
+                    isCustom: true,
+                    access: item.access,
+                    auth: item.auth,
+                  });
+                }
               }
             }
           }
@@ -768,8 +1185,8 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
         }
       }
 
-      return DEFAULT_AGENT_TOOL_DEFS
-        .filter((t) => enabledMap[t.name] !== false)
+      return allTools
+        .filter((t) => t.enabled)
         .map((t) => ({
           id: `omnia-tool:${t.name}`,
           companyId,
@@ -778,8 +1195,8 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
           toolName: t.name,
           title: t.label,
           description: t.description,
-          riskLevel: t.riskLevel,
-          isReadOnly: t.isReadOnly,
+          riskLevel: t.riskLevel || "medium",
+          isReadOnly: Boolean(t.isReadOnly),
           isWrite: !t.isReadOnly,
           isDestructive: false,
           status: "active",

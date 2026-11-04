@@ -297,7 +297,11 @@ function OmniaConfigDialog({
     ok: boolean;
     message: string;
     models?: string[];
-  } | null>(null);
+  }>({
+    tested: false,
+    ok: false,
+    message: "",
+  });
 
   useEffect(() => {
     if (configData) {
@@ -376,10 +380,10 @@ function OmniaConfigDialog({
   });
 
   useEffect(() => {
-    if (open && !testStatus.tested) {
+    if (open && !testStatus?.tested && !testMutation.isPending) {
       testMutation.mutate();
     }
-  }, [open, testStatus.tested]);
+  }, [open, testStatus?.tested, testMutation.isPending]);
 
   const defaultOmniaModels = [
     { id: "qwen3.8:latest", label: "Qwen 3.8 (Latest, 27.3B, tools, thinking)" },
@@ -392,7 +396,7 @@ function OmniaConfigDialog({
     { id: "qwen3-embedding:0.6b", label: "Qwen 3 Embedding 0.6B" },
   ];
 
-  const availableModels = testStatus.models && testStatus.models.length > 0
+  const availableModels = testStatus?.models && testStatus.models.length > 0
     ? testStatus.models.map((m) => ({ id: m, label: m }))
     : defaultOmniaModels;
 
