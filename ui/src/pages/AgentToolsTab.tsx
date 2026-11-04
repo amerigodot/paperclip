@@ -790,10 +790,10 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
 
   const allowedTools = useMemo(
     () =>
-      [...(effective.data?.allowedTools ?? []), ...adapterTools].sort((a, b) =>
+      [...(effective.data?.allowedTools ?? [])].sort((a, b) =>
         a.toolName.localeCompare(b.toolName),
       ),
-    [effective.data?.allowedTools, adapterTools],
+    [effective.data?.allowedTools],
   );
 
   const permittedConnectionIds = useMemo(
@@ -908,7 +908,8 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
         />
       )}
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      {!isOmnia && (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {/* Allowed tools table */}
         <div className="lg:col-span-2">
           <div className="rounded-lg border border-border">
@@ -1102,6 +1103,7 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
           </div>
         </aside>
       </div>
+      )}
     </div>
   );
 }

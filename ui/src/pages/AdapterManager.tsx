@@ -360,6 +360,11 @@ function OmniaConfigDialog({
         message: res.message,
         models: res.models,
       });
+      if (res.ok && res.models && res.models.length > 0) {
+        if (!model || model === "qwen2.5:7b") {
+          setModel(res.models[0]);
+        }
+      }
     },
     onError: (err: Error) => {
       setTestStatus({
@@ -370,14 +375,26 @@ function OmniaConfigDialog({
     },
   });
 
-  const availableModels = [
-    { id: "qwen2.5:7b", label: "Qwen 2.5 7B (Tools + Function Calling)" },
-    { id: "llama3.1:8b", label: "Llama 3.1 8B (Tools + Function Calling)" },
-    { id: "deepseek-r1:8b", label: "DeepSeek R1 8B (Thinking)" },
-    { id: "mistral-nemo:12b", label: "Mistral Nemo 12B (Tools)" },
-    { id: "qwen2.5:3b", label: "Qwen 2.5 3B" },
-    { id: "gemma2:9b", label: "Gemma 2 9B" },
+  useEffect(() => {
+    if (open && !testStatus.tested) {
+      testMutation.mutate();
+    }
+  }, [open, testStatus.tested]);
+
+  const defaultOmniaModels = [
+    { id: "qwen3.8:latest", label: "Qwen 3.8 (Latest, 27.3B, tools, thinking)" },
+    { id: "deepseek-r1:14b", label: "DeepSeek R1 14B (Thinking / Reasoning)" },
+    { id: "qwen3.5:9b", label: "Qwen 3.5 9B (Tools + Thinking)" },
+    { id: "orcarouter/Qwen3.8-27B-Uncensored:latest", label: "Qwen 3.8 27B Uncensored (Latest)" },
+    { id: "orcarouter/Qwen3.8-27B-Uncensored:iq3_m", label: "Qwen 3.8 27B Uncensored (IQ3_M)" },
+    { id: "qwen3-vl:latest", label: "Qwen 3 VL (Vision-Language, 8.8B)" },
+    { id: "gpt-oss:20b", label: "GPT OSS 20B (MXFP4, thinking, tools)" },
+    { id: "qwen3-embedding:0.6b", label: "Qwen 3 Embedding 0.6B" },
   ];
+
+  const availableModels = testStatus.models && testStatus.models.length > 0
+    ? testStatus.models.map((m) => ({ id: m, label: m }))
+    : defaultOmniaModels;
 
   const omniaTools = [
     { name: "git_intelligence", label: "Git Intelligence", desc: "Branch changelogs, tag ranges, beta features, refactor analysis" },
@@ -456,22 +473,50 @@ function OmniaConfigDialog({
                 Default: <code className="text-foreground">https://api.ntv.cloud2local.com/omnia/api</code>
               </p>
               {testStatus?.tested && (
-                <div
-                  className={cn(
-                    "flex items-center gap-2 rounded-md p-2 text-xs",
-                    testStatus.ok ? "bg-green-500/10 text-green-700 dark:text-green-300" : "bg-destructive/10 text-destructive"
-                  )}
-                >
-                  {testStatus.ok ? (
-                    <>
-                      <CheckCircle2 className="h-4 w-4 shrink-0" />
-                      <span>{testStatus.message} {testStatus.models?.length ? `(${testStatus.models.length} models detected)` : ""}</span>
-                    </>
-                  ) : (
-                    <>
-                      <XCircle className="h-4 w-4 shrink-0" />
-                      <span>{testStatus.message}</span>
-                    </>
+                <div className="space-y-2">
+                  <div
+                    className={cn(
+                      "flex items-center gap-2 rounded-md p-2 text-xs",
+                      testStatus.ok ? "bg-green-500/10 text-green-700 dark:text-green-300" : "bg-destructive/10 text-destructive"
+                    )}
+                  >
+                    {testStatus.ok ? (
+                      <>
+                        <CheckCircle2 className="h-4 w-4 shrink-0" />
+                        <span>{testStatus.message} {testStatus.models?.length ? `(${testStatus.models.length} remote models available)` : ""}</span>
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="h-4 w-4 shrink-0" />
+                        <span>{testStatus.message}</span>
+                      </>
+                    )}
+                  </div>
+
+                  {testStatus.ok && testStatus.models && testStatus.models.length > 0 && (
+                    <div className="rounded-md border border-border/60 bg-muted/30 p-2.5 space-y-1.5">
+                      <div className="flex items-center justify-between text-(length:--text-nano) font-medium text-muted-foreground">
+                        <span>Remote Models Discovered:</span>
+                        <span className="font-mono text-primary font-semibold">Active: {model}</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1 max-h-32 overflow-y-auto">
+                        {testStatus.models.map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => setModel(m)}
+                            className={cn(
+                              "rounded border px-2 py-0.5 text-(length:--text-nano) font-mono transition-colors",
+                              model === m
+                                ? "border-primary bg-primary/20 text-primary font-bold shadow-xs"
+                                : "border-border bg-background text-foreground hover:bg-muted"
+                            )}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </div>
               )}

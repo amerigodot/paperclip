@@ -3,15 +3,17 @@ export const label = "OmnIA";
 
 export const DEFAULT_OMNIA_ENDPOINT = "https://api.ntv.cloud2local.com/omnia/api";
 export const DEFAULT_OLLAMA_HOST = DEFAULT_OMNIA_ENDPOINT;
-export const DEFAULT_OLLAMA_MODEL = "qwen2.5:7b";
+export const DEFAULT_OLLAMA_MODEL = "qwen3.8:latest";
 
 export const models: Array<{ id: string; label: string }> = [
-  { id: "qwen2.5:7b", label: "Qwen 2.5 7B (Tools + Function Calling)" },
-  { id: "llama3.1:8b", label: "Llama 3.1 8B (Tools + Function Calling)" },
-  { id: "deepseek-r1:8b", label: "DeepSeek R1 8B (Thinking)" },
-  { id: "mistral-nemo:12b", label: "Mistral Nemo 12B (Tools)" },
-  { id: "qwen2.5:3b", label: "Qwen 2.5 3B" },
-  { id: "gemma2:9b", label: "Gemma 2 9B" },
+  { id: "qwen3.8:latest", label: "Qwen 3.8 (Latest, 27.3B, thinking, tools)" },
+  { id: "deepseek-r1:14b", label: "DeepSeek R1 14B (Thinking / Reasoning)" },
+  { id: "qwen3.5:9b", label: "Qwen 3.5 9B (Tools + Thinking)" },
+  { id: "orcarouter/Qwen3.8-27B-Uncensored:latest", label: "Qwen 3.8 27B Uncensored (Latest)" },
+  { id: "orcarouter/Qwen3.8-27B-Uncensored:iq3_m", label: "Qwen 3.8 27B Uncensored (IQ3_M)" },
+  { id: "qwen3-vl:latest", label: "Qwen 3 VL (Vision-Language, 8.8B)" },
+  { id: "gpt-oss:20b", label: "GPT OSS 20B (MXFP4, thinking, tools)" },
+  { id: "qwen3-embedding:0.6b", label: "Qwen 3 Embedding 0.6B" },
 ];
 
 export interface OllamaModelOptions {

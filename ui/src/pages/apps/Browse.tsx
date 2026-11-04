@@ -62,6 +62,7 @@ import {
 import { agentsApi } from "@/api/agents";
 import { AgentAvatar, type AvatarAgent } from "@/components/AgentAvatar";
 import { accessApi } from "@/api/access";
+import { adaptersApi } from "@/api/adapters";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -260,6 +261,9 @@ function connectionRank(connection: ToolConnection): number {
 }
 
 function rowRank(row: ConnectorRowModel): number {
+  if (row.slug === "omnia" || row.key === "adapter:omnia" || row.key.startsWith("adapter:omnia")) {
+    return 1000;
+  }
   if (
     row.chatEndpoints.some((endpoint) => endpoint.status !== "draft") ||
     row.connections.some((connection) => connectionRank(connection) === 1) ||
@@ -433,6 +437,11 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
     queryFn: () => accessApi.listUserDirectory(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
+  const adaptersQuery = useQuery({
+    queryKey: queryKeys.adapters.all,
+    queryFn: () => adaptersApi.list(),
+  });
+  const hasOmniaAdapter = Boolean(adaptersQuery.data?.some((a) => a.type === "omnia" && !a.disabled));
   const aggregatorGateways = useMemo(() => (connectionsQuery.data?.connections ?? []).filter(connection =>
     isAppAggregator(appConnectionSourceSlug(connection)) && connection.transport === "mcp_remote" &&
     connection.status !== "archived" && !isRetiredComposioConnection(connection)), [connectionsQuery.data]);
@@ -642,6 +651,21 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
       });
     }
 
+    if (hasOmniaAdapter && !rowsBySlug.has("omnia")) {
+      rowsBySlug.set("omnia", {
+        key: "adapter:omnia",
+        slug: "omnia",
+        name: "OmnIA Engine",
+        description:
+          "Sovereign local & remote LLM orchestration engine with integrated tool registry, Git intelligence, and artifact reporting.",
+        brandKey: "omnia",
+        entry: null,
+        applications: [],
+        connections: [],
+        chatEndpoints: [],
+      });
+    }
+
     const customRows: ConnectorRowModel[] = [];
     for (const application of activeApplications) {
       const applicationSlug = appApplicationSourceSlug(application);
@@ -800,6 +824,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
     gallery,
     galleryQuery.data,
     upstreamAppsBySlug,
+    hasOmniaAdapter,
   ]);
 
   const trimmed = query.trim().toLocaleLowerCase();
@@ -1151,6 +1176,11 @@ export function ConnectorCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-foreground">{row.name}</h2>
+            {(row.slug === "omnia" || row.key === "adapter:omnia" || row.key.startsWith("adapter:omnia")) && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-(length:--text-nano) font-semibold text-primary">
+                Pinned Engine
+              </span>
+            )}
             {row.aggregatorApp?.routes.map((route) => {
               const providerName = AGGREGATOR_NAMES[route.provider];
               const managedSnapshot = row.upstreamApps?.find(app => (app.provider ?? "composio") === route.provider && app.accounts.length > 0);
