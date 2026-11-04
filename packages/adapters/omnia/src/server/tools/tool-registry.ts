@@ -14,9 +14,10 @@ import {
 } from "./graphql.js";
 import { resolveAuth, type AuthConfig } from "./auth.js";
 import { executeGitIntelligence, GIT_INTELLIGENCE_TOOL_DEFINITION, type GitToolResult } from "./git-intelligence.js";
+import { executeGitLabIntelligence, GITLAB_INTELLIGENCE_TOOL_DEFINITION } from "./gitlab-intelligence.js";
 import { asString, asNumber } from "../utils.js";
 
-export type ToolType = "ip_location" | "http_request" | "graphql" | "inspect_api" | "git" | "custom";
+export type ToolType = "ip_location" | "http_request" | "graphql" | "inspect_api" | "git" | "gitlab" | "custom";
 
 export type ToolAuthType = "none" | "bearer" | "api_key" | "basic" | "hmac";
 
@@ -135,6 +136,13 @@ export const DEFAULT_OMNIA_TOOLS: OmniaToolDefinition[] = [
     label: "Git Intelligence & Changelog Analyzer",
     description: "Analyzes git history, generates branch changelogs, evaluates tag ranges, detects beta features, and inspects active refactorings.",
     type: "git",
+    enabled: true,
+  },
+  {
+    name: "gitlab_intelligence",
+    label: "GitLab Intelligence & Repository Inspector",
+    description: "Deep inspection of GitLab repositories (remote API v4 & local git): branch comparison, tag releases on main, beta feature preview, active refactorings detection, merge requests, pipeline health, and structured changelog generation.",
+    type: "gitlab",
     enabled: true,
   },
 ];
@@ -455,6 +463,10 @@ export function buildOllamaTools(tools: OmniaToolDefinition[]): unknown[] {
 
       case "git":
         definitions.push(GIT_INTELLIGENCE_TOOL_DEFINITION);
+        break;
+
+      case "gitlab":
+        definitions.push(GITLAB_INTELLIGENCE_TOOL_DEFINITION);
         break;
 
       default:
@@ -849,6 +861,29 @@ export async function executeToolByName(
         operation: "git",
         status: "error",
         error: `Git intelligence operation failed: ${err instanceof Error ? err.message : String(err)}`,
+        executionMs: Date.now() - startTime,
+      };
+    }
+  }
+
+  // 6. GitLab Intelligence Tool
+  if (tool.type === "gitlab" || tool.name === "gitlab_intelligence") {
+    try {
+      const res = await executeGitLabIntelligence(rawArgs, globalConfig);
+      return {
+        tool: tool.name,
+        operation: res.operation,
+        status: res.success ? "success" : "error",
+        data: res.markdown ? { markdown: res.markdown, ...((res.data as object) || {}) } : res.data,
+        error: res.error,
+        executionMs: res.executionMs,
+      };
+    } catch (err) {
+      return {
+        tool: tool.name,
+        operation: "gitlab",
+        status: "error",
+        error: `GitLab intelligence operation failed: ${err instanceof Error ? err.message : String(err)}`,
         executionMs: Date.now() - startTime,
       };
     }

@@ -328,6 +328,14 @@ function InstallSaveStatusChip({
 
 export const DEFAULT_AGENT_TOOL_DEFS = [
   {
+    name: "gitlab_intelligence",
+    label: "GitLab Intelligence & Repository Inspector",
+    description: "Deep inspection of GitLab repositories (remote API v4 & local git): branch comparison, tag releases on main, beta feature preview, active refactorings detection, merge requests, pipeline health, and structured changelog generation.",
+    type: "gitlab",
+    isReadOnly: true,
+    riskLevel: "low" as const,
+  },
+  {
     name: "git_intelligence",
     label: "Git Intelligence & Changelog Analyzer",
     description: "Analyzes git history, generates branch changelogs, evaluates tag ranges, detects beta features, and inspects active refactorings.",
@@ -1441,7 +1449,7 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
                     OmnIA Sovereign AI Engine
                   </div>
                   <div className="mt-1 flex items-center gap-1.5 text-(length:--text-nano) text-muted-foreground">
-                    <span>{adapterTools.length} built-in tools declared (including Git Intelligence)</span>
+                    <span>{adapterTools.length} built-in tools declared (including GitLab & Git Intelligence)</span>
                   </div>
                 </div>
               </div>

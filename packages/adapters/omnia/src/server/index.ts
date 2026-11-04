@@ -103,6 +103,28 @@ export {
   type BranchRefactorInfo,
 } from "./tools/git-intelligence.js";
 
+export {
+  executeGitLabIntelligence,
+  generateThreeTierChangelog,
+  fetchGitLabApi,
+  fetchProjectMetadata,
+  fetchProjectBranches,
+  fetchProjectTags,
+  fetchProjectCompare,
+  fetchProjectMergeRequests,
+  fetchProjectPipelines,
+  normalizeGitLabProjectPath,
+  mapTouchedSubsystems,
+  GITLAB_INTELLIGENCE_TOOL_DEFINITION,
+  type GitLabOperation,
+  type GitLabToolOptions,
+  type GitLabProjectMeta,
+  type GitLabBranchInfo,
+  type GitLabTagInfo,
+  type GitLabMergeRequestInfo,
+  type GitLabPipelineInfo,
+} from "./tools/gitlab-intelligence.js";
+
 export function createServerAdapter(): ServerAdapterModule {
   return {
     type,
