@@ -35,8 +35,9 @@ export interface AdapterPluginRecord {
   disabled?: boolean;
 }
 
-interface AdapterSettings {
+export interface AdapterSettings {
   disabledTypes: string[];
+  adapterConfigs?: Record<string, Record<string, unknown>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,12 +110,15 @@ function readSettings(): AdapterSettings {
     const parsed = JSON.parse(raw);
     settingsCache = {
       path: adapterSettingsPath,
-      settings: parsed && Array.isArray(parsed.disabledTypes)
-        ? (parsed as AdapterSettings)
-        : { disabledTypes: [] },
+      settings: parsed && typeof parsed === "object"
+        ? {
+            disabledTypes: Array.isArray(parsed.disabledTypes) ? parsed.disabledTypes : [],
+            adapterConfigs: parsed.adapterConfigs && typeof parsed.adapterConfigs === "object" ? parsed.adapterConfigs : {},
+          }
+        : { disabledTypes: [], adapterConfigs: {} },
     };
   } catch {
-    settingsCache = { path: adapterSettingsPath, settings: { disabledTypes: [] } };
+    settingsCache = { path: adapterSettingsPath, settings: { disabledTypes: [], adapterConfigs: {} } };
   }
   return settingsCache.settings;
 }
@@ -189,4 +193,31 @@ export function setAdapterDisabled(type: string, disabled: boolean): boolean {
     return true;
   }
   return false;
+}
+
+export function getAdapterConfig(type: string): Record<string, unknown> {
+  const settings = readSettings();
+  const configs = settings.adapterConfigs ?? {};
+  if (configs[type]) return configs[type];
+  if (type === "omnia") {
+    return {
+      baseUrl: "https://api.ntv.cloud2local.com/omnia/api",
+      model: "qwen2.5:7b",
+      temperature: 0.8,
+      num_ctx: 4096,
+      num_predict: 2048,
+      omnia_mode: "permissive",
+    };
+  }
+  return {};
+}
+
+export function setAdapterConfig(type: string, config: Record<string, unknown>): void {
+  const current = readSettings();
+  const settings: AdapterSettings = {
+    ...current,
+    adapterConfigs: { ...(current.adapterConfigs ?? {}) },
+  };
+  settings.adapterConfigs![type] = config;
+  writeSettings(settings);
 }

@@ -96,4 +96,15 @@ export const adaptersApi = {
   /** Reinstall an npm-sourced adapter (pulls latest from registry, then reloads). */
   reinstall: (type: string) =>
     api.post<{ type: string; version?: string; reinstalled: boolean }>(`/adapters/${type}/reinstall`, {}),
+
+  /** Get configured instance settings for an adapter. */
+  getConfig: (type: string) => api.get<Record<string, unknown>>(`/adapters/${type}/config`),
+
+  /** Save configured instance settings for an adapter. */
+  saveConfig: (type: string, config: Record<string, unknown>) =>
+    api.put<{ success: boolean; config: Record<string, unknown> }>(`/adapters/${type}/config`, config),
+
+  /** Test endpoint connectivity for an adapter. */
+  testConnection: (type: string, config?: Record<string, unknown>) =>
+    api.post<{ ok: boolean; endpoint: string; message: string; models?: string[] }>(`/adapters/${type}/test`, config ?? {}),
 };

@@ -57,6 +57,7 @@ import {
   updateToolPolicySchema,
   updateToolProfileEntrySchema,
   updateToolProfileWithEntriesSchema,
+  type AppDefinition,
 } from "@paperclipai/shared";
 import { filterConnectionManagementRows, filterConnectionManagementPolicies, connectionManagementGuard, requiredConnectionUserAction, connectionRequestActor, connectionRequestContext, connectionRequestUserId } from "./connection-management-authz.js";
 import { connectionManagementService } from "../services/connection-management.js";
@@ -879,7 +880,32 @@ function connectorEnrollmentPrincipal(req: Request): string {
       apps: [...APP_STORE_DEFINITIONS.filter((app) => (settings.enableMemoryConnectors || !isMemoryConnectorId(app.slug))
         && isConnectorFeatureEnabled(app, settings)).map((app) =>
         appWithPaperclipCloudConnectorAvailability(app, advertisedProfiles)
-      ), ...await aiConnectionRouterService(db).catalog()],
+      ), ...await aiConnectionRouterService(db).catalog(), {
+        schemaVersion: 1,
+        slug: "omnia",
+        name: "OmnIA",
+        description: "Sovereign AI Engine and Execution Adapter with Git Intelligence, API documentation inspection, and HTTP/GraphQL tools.",
+        categories: ["ai"],
+        branding: {
+          logoUrl: "/brands/omnia-logo-dark.svg",
+          darkLogoUrl: "/brands/omnia-logo-light.svg",
+        },
+        urlPatterns: [],
+        methods: [
+          {
+            key: "adapter-config",
+            label: "Configure OmnIA",
+            purpose: "ai",
+            transport: "runtime_auth",
+            auth: "api_key",
+            ownershipModes: ["customer"],
+            whenToUse: "Configure model options, remote host endpoint, and tool suites for OmnIA.",
+            guidanceMd: "Configure model options, remote host endpoint, and tool suites for OmnIA.",
+            riskTier: "S3",
+          },
+        ],
+        tags: ["ai", "adapter", "git", "model-provider"],
+      } as AppDefinition],
     });
   });
 

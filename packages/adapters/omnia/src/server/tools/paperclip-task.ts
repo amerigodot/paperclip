@@ -1,0 +1,359 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
+export const SET_TASK_TITLE_TOOL_DEFINITION = {
+  type: "function",
+  function: {
+    name: "set_task_title",
+    description: "Sets or updates the task title in Paperclip when requested or when provisional.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "Concise title describing the requested outcome",
+        },
+        onlyIfProvisional: {
+          type: "boolean",
+          description: "Only set if the current task title is provisional",
+        },
+      },
+      required: ["title"],
+    },
+  },
+};
+
+export const SAVE_ARTIFACT_TOOL_DEFINITION = {
+  type: "function",
+  function: {
+    name: "save_artifact",
+    description: "Publishes or updates a persistent markdown report, document, or artifact on the current Paperclip task/issue. You can provide title and key; the markdown report is automatically attached if content is omitted.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "Human-readable title of the document or report (e.g. 'Security Advisory Report — coollabsio/coolify')",
+        },
+        content: {
+          type: "string",
+          description: "Optional: the complete markdown body. If omitted, the full structured report from your response is automatically captured.",
+        },
+        key: {
+          type: "string",
+          description: "Unique slug identifier for the document (e.g. 'security-report', 'audit-report', 'summary'). Lowercase letters, numbers, hyphens or underscores only (max 64 chars). Defaults to 'security-report'.",
+        },
+        changeSummary: {
+          type: "string",
+          description: "Brief note describing the revision or changes (e.g. 'Initial security audit report')",
+        },
+      },
+    },
+  },
+};
+
+/**
+ * Normalizes an artifact/document key according to Paperclip's issueDocumentKeySchema:
+ * ^[a-z0-9][a-z0-9_-]*$, max length 64 chars.
+ */
+export function normalizeArtifactKey(rawKey?: string, title?: string): string {
+  let key = (rawKey || "").trim().toLowerCase();
+  if (!key && title) {
+    key = title
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  // Clean illegal chars, ensure starting with alphanumeric
+  key = key.replace(/[^a-z0-9_-]/g, "-").replace(/^-+/, "").slice(0, 64);
+  if (!key || !/^[a-z0-9]/.test(key)) {
+    key = "report";
+  }
+  return key;
+}
+
+/**
+ * Extracts a top-level H1 title from Markdown text if present.
+ */
+export function deriveTitleFromMarkdown(md: string): string | null {
+  if (!md) return null;
+  const match = md.match(/^#\s+(.+)$/m);
+  if (match && match[1]) {
+    return match[1].replace(/[#*_`]/g, "").trim();
+  }
+  return null;
+}
+
+/**
+ * Detects whether assistant text contains a structured report or analysis
+ * worthy of being persisted as a Paperclip document/artifact.
+ */
+export function isStructuredMarkdownReport(text: string): boolean {
+  if (!text || text.length < 100) return false;
+  const hasHeaders = /^#{1,3}\s+/m.test(text);
+  const hasTables = /\|[^\n]+\|\n\|[-:\s|]+\|/m.test(text);
+  const hasReportKeywords = /(?:Security|Advisory|Audit|Vulnerability|Report|Rapporto|Analisi|Findings|CVE|Overview|Raccomandazioni|Summary)/i.test(text);
+  return (hasHeaders || hasTables) && hasReportKeywords;
+}
+
+/**
+ * Extracts the report content starting from the first top-level Markdown header,
+ * stripping conversational preamble like "Ho analizzato la repo... Genero il report:".
+ */
+export function extractReportMarkdown(text: string): string {
+  if (!text) return "";
+  const h1Match = text.search(/^#\s+/m);
+  if (h1Match !== -1 && h1Match < 400) {
+    return text.slice(h1Match).trim();
+  }
+  return text.trim();
+}
+
+export interface SaveArtifactOptions {
+  issueId?: string | null;
+  apiUrl?: string;
+  authToken?: string;
+  workspacePath?: string | null;
+  fallbackContent?: string | null;
+}
+
+export async function handleSaveArtifact(
+  args: Record<string, unknown>,
+  opts: SaveArtifactOptions,
+): Promise<{
+  success: boolean;
+  documentId?: string;
+  key?: string;
+  title?: string;
+  revision?: number;
+  filePath?: string;
+  error?: string;
+}> {
+  let content = typeof args.content === "string" && args.content.trim()
+    ? args.content.trim()
+    : typeof args.body === "string" && args.body.trim()
+      ? args.body.trim()
+      : (opts.fallbackContent ? extractReportMarkdown(opts.fallbackContent) : "");
+
+  if (!content) {
+    return { success: false, error: "Content/body must not be empty (no report content found)" };
+  }
+
+  const derivedTitle = deriveTitleFromMarkdown(content);
+  const title = typeof args.title === "string" && args.title.trim()
+    ? args.title.trim()
+    : (derivedTitle || "Security & Analysis Report");
+
+  const key = normalizeArtifactKey(
+    typeof args.key === "string" ? args.key : undefined,
+    title,
+  );
+
+  const changeSummary = typeof args.changeSummary === "string" && args.changeSummary.trim()
+    ? args.changeSummary.trim()
+    : "Document artifact generated by OmnIA agent";
+
+  const issueId = opts.issueId?.trim();
+  let documentId: string | undefined;
+  let revision: number | undefined;
+
+  // 1. Persist to Paperclip's Issue Documents API if bound to an issue
+  if (issueId) {
+    const apiUrl = (opts.apiUrl || process.env.PAPERCLIP_API_URL || "http://127.0.0.1:3100").replace(/\/$/, "");
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (opts.authToken) {
+      headers.Authorization = `Bearer ${opts.authToken}`;
+    }
+
+    try {
+      // Step A: Check if document already exists to get baseRevisionId (required by Paperclip for updates)
+      let baseRevisionId: string | null = null;
+      try {
+        const getRes = await fetch(`${apiUrl}/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`, {
+          method: "GET",
+          headers,
+        });
+        if (getRes.ok) {
+          const existing = (await getRes.json().catch(() => null)) as { latestRevisionId?: string } | null;
+          if (existing?.latestRevisionId) {
+            baseRevisionId = existing.latestRevisionId;
+          }
+        }
+      } catch {
+        // Ignore GET failure; fallback to fresh document creation
+      }
+
+      // Step B: Upsert document
+      const putPayload: Record<string, unknown> = {
+        title,
+        format: "markdown",
+        body: content,
+        changeSummary,
+      };
+      if (baseRevisionId) {
+        putPayload.baseRevisionId = baseRevisionId;
+      }
+
+      let putRes = await fetch(`${apiUrl}/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(putPayload),
+      });
+
+      // Step C: If 409 Conflict occurred (optimistic lock), fetch updated baseRevisionId and retry once
+      if (putRes.status === 409) {
+        const retryGet = await fetch(`${apiUrl}/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`, {
+          method: "GET",
+          headers,
+        });
+        if (retryGet.ok) {
+          const fresh = (await retryGet.json().catch(() => null)) as { latestRevisionId?: string } | null;
+          if (fresh?.latestRevisionId) {
+            putPayload.baseRevisionId = fresh.latestRevisionId;
+            putRes = await fetch(`${apiUrl}/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`, {
+              method: "PUT",
+              headers,
+              body: JSON.stringify(putPayload),
+            });
+          }
+        }
+      }
+
+      if (!putRes.ok) {
+        const errText = await putRes.text().catch(() => "");
+        return { success: false, error: `Paperclip Document API error (HTTP ${putRes.status}): ${errText}` };
+      }
+
+      const docData = (await putRes.json().catch(() => ({}))) as {
+        id?: string;
+        latestRevisionNumber?: number;
+      };
+      documentId = docData.id;
+      revision = docData.latestRevisionNumber;
+    } catch (err) {
+      return { success: false, error: `Failed to contact Paperclip API: ${err}` };
+    }
+  }
+
+  // 2. Persist to local workspace filesystem if workspace path is available
+  let filePath: string | undefined;
+  if (opts.workspacePath) {
+    try {
+      const artifactsDir = path.join(opts.workspacePath, "artifacts");
+      await fs.mkdir(artifactsDir, { recursive: true });
+      filePath = path.join(artifactsDir, `${key}.md`);
+      await fs.writeFile(filePath, content, "utf-8");
+    } catch {
+      // Fallback: try writing directly in workspace root
+      try {
+        filePath = path.join(opts.workspacePath, `${key}.md`);
+        await fs.writeFile(filePath, content, "utf-8");
+      } catch {
+        // Workspace file writing is best-effort; database document is authoritative
+        filePath = undefined;
+      }
+    }
+  }
+
+  return {
+    success: true,
+    documentId,
+    key,
+    title,
+    revision,
+    filePath,
+  };
+}
+
+export async function handleSetTaskTitle(
+  args: Record<string, unknown>,
+  opts: {
+    issueId?: string | null;
+    apiUrl?: string;
+    authToken?: string;
+  },
+): Promise<{ success: boolean; title?: string; changed?: boolean; error?: string }> {
+  const issueId = opts.issueId?.trim();
+  const title = typeof args.title === "string" ? args.title.trim() : "";
+  const onlyIfProvisional = args.onlyIfProvisional !== false;
+
+  if (!title) {
+    return { success: false, error: "Title must not be empty" };
+  }
+
+  if (!issueId) {
+    // If not bound to an issue, acknowledge cleanly
+    return { success: true, title, changed: false };
+  }
+
+  const apiUrl = (opts.apiUrl || process.env.PAPERCLIP_API_URL || "http://127.0.0.1:3100").replace(/\/$/, "");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (opts.authToken) {
+    headers.Authorization = `Bearer ${opts.authToken}`;
+  }
+
+  try {
+    const res = await fetch(`${apiUrl}/api/issues/${encodeURIComponent(issueId)}/title`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        title,
+        onlyIfProvisional,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      return { success: false, error: `HTTP ${res.status}: ${errText}` };
+    }
+
+    const data = (await res.json().catch(() => ({}))) as { changed?: boolean; title?: string };
+    const savedTitle = data.title || title;
+    return {
+      success: true,
+      title: savedTitle,
+      changed: data.changed ?? true,
+    };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+}
+
+/**
+ * Transitions a Paperclip issue status to 'done'.
+ * This prevents Paperclip's watchdog from escalating disposition_repair retries.
+ */
+export async function markIssueDone(opts: {
+  issueId?: string | null;
+  apiUrl?: string;
+  authToken?: string;
+}): Promise<boolean> {
+  const issueId = opts.issueId?.trim();
+  if (!issueId) return false;
+
+  const apiUrl = (opts.apiUrl || process.env.PAPERCLIP_API_URL || "http://127.0.0.1:3100").replace(/\/$/, "");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (opts.authToken) {
+    headers.Authorization = `Bearer ${opts.authToken}`;
+  }
+
+  try {
+    const res = await fetch(`${apiUrl}/api/issues/${encodeURIComponent(issueId)}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        status: "done",
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

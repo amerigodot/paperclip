@@ -39,6 +39,8 @@ import {
   getAdapterPluginsDir,
   getDisabledAdapterTypes,
   setAdapterDisabled,
+  getAdapterConfig,
+  setAdapterConfig,
 } from "../services/adapter-plugin-store.js";
 import type { AdapterPluginRecord } from "../services/adapter-plugin-store.js";
 import type { ServerAdapterModule, AdapterConfigSchema } from "../adapters/types.js";
@@ -306,7 +308,11 @@ export function adapterRoutes(options: {
 
     const result: AdapterInfo[] = registeredAdapters.map((adapter) =>
       buildAdapterInfo(adapter, externalRecords.get(adapter.type), disabledSet, target),
-    ).sort((a, b) => a.type.localeCompare(b.type));
+    ).sort((a, b) => {
+      if (a.type === "omnia") return -1;
+      if (b.type === "omnia") return 1;
+      return a.type.localeCompare(b.type);
+    });
 
     res.json(result);
   });
@@ -792,6 +798,105 @@ export function adapterRoutes(options: {
       return;
     }
     res.type("application/javascript").send(source);
+  });
+
+  /**
+   * GET /api/adapters/:type/config
+   *
+   * Retrieve adapter instance configuration (e.g. baseUrl, default model, etc.).
+   */
+  router.get("/adapters/:type/config", async (req, res) => {
+    assertBoardOrgAccess(req);
+    const { type } = req.params;
+    const adapter = findActiveServerAdapter(type);
+    if (!adapter) {
+      res.status(404).json({ error: `Adapter "${type}" is not registered.` });
+      return;
+    }
+    const config = getAdapterConfig(type);
+    res.json(config);
+  });
+
+  /**
+   * PUT /api/adapters/:type/config
+   *
+   * Save adapter instance configuration.
+   */
+  router.put("/adapters/:type/config", async (req, res) => {
+    assertInstanceAdmin(req);
+    assertAdapterManagementVisible();
+    const { type } = req.params;
+    const adapter = findActiveServerAdapter(type);
+    if (!adapter) {
+      res.status(404).json({ error: `Adapter "${type}" is not registered.` });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    setAdapterConfig(type, body);
+    logger.info({ type, config: body }, "Adapter configuration saved");
+    res.json({ success: true, config: body });
+  });
+
+  /**
+   * POST /api/adapters/:type/test
+   *
+   * Test endpoint connectivity for an adapter.
+   */
+  router.post("/adapters/:type/test", async (req, res) => {
+    assertBoardOrgAccess(req);
+    const { type } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const targetUrl = typeof body.baseUrl === "string" && body.baseUrl.trim()
+      ? body.baseUrl.trim()
+      : "https://api.ntv.cloud2local.com/omnia/api";
+
+    try {
+      const cleanUrl = targetUrl.replace(/\/+$/, "");
+      const candidates = [
+        cleanUrl.endsWith("/api") ? `${cleanUrl}/tags` : `${cleanUrl}/api/tags`,
+        `${cleanUrl}/tags`,
+        `${cleanUrl}/api/tags`,
+      ];
+      const urlsToTry = [...new Set(candidates)];
+      let reachable = false;
+      let tags: string[] = [];
+
+      for (const testUrl of urlsToTry) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 4000);
+          const resp = await fetch(testUrl, { signal: controller.signal });
+          clearTimeout(timer);
+          if (resp.ok) {
+            reachable = true;
+            const data = (await resp.json()) as { models?: Array<{ name: string }> };
+            tags = (data.models ?? []).map((m) => m.name);
+            break;
+          }
+        } catch {
+          // try next URL
+        }
+      }
+
+      if (!reachable) {
+        const vUrl = cleanUrl.endsWith("/api") ? `${cleanUrl}/version` : `${cleanUrl}/api/version`;
+        const resp = await fetch(vUrl, { signal: AbortSignal.timeout(3000) }).catch(() => null);
+        if (resp && resp.ok) reachable = true;
+      }
+
+      res.json({
+        ok: reachable,
+        endpoint: targetUrl,
+        message: reachable ? "Endpoint is reachable and responding" : "Endpoint could not be reached",
+        models: tags,
+      });
+    } catch (err) {
+      res.json({
+        ok: false,
+        endpoint: targetUrl,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   return router;

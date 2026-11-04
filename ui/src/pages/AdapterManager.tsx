@@ -6,9 +6,10 @@
  */
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Cpu, Plus, Power, Trash2, FolderOpen, Package, RefreshCw, Download } from "lucide-react";
+import { AlertTriangle, Cpu, Plus, Power, Trash2, FolderOpen, Package, RefreshCw, Download, Settings, CheckCircle2, XCircle, Globe, Sliders, Shield } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
+import { useSearchParams } from "@/lib/router";
 import { adaptersApi } from "@/api/adapters";
 import type { AdapterInfo } from "@/api/adapters";
 import { getAdapterLabel } from "@/adapters/adapter-display-registry";
@@ -40,6 +41,7 @@ function AdapterRow({
   onRemove,
   onReload,
   onReinstall,
+  onConfigure,
   isToggling,
   isReloading,
   isReinstalling,
@@ -57,6 +59,7 @@ function AdapterRow({
   onRemove: (type: string) => void;
   onReload?: (type: string) => void;
   onReinstall?: (type: string) => void;
+  onConfigure?: (type: string) => void;
   isToggling: boolean;
   isReloading?: boolean;
   isReinstalling?: boolean;
@@ -113,6 +116,17 @@ function AdapterRow({
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {onConfigure && (
+            <Button
+              variant="outline"
+              size="icon-sm"
+              className="h-8 w-8 text-primary hover:text-primary"
+              title="Configure adapter settings & endpoints"
+              onClick={() => onConfigure(adapter.type)}
+            >
+              <Settings className="h-4 w-4" />
+            </Button>
+          )}
           {onReinstall && (
             <Button
               variant="outline"
@@ -254,9 +268,369 @@ function ReinstallDialog({
   );
 }
 
+function OmniaConfigDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const { pushToast } = useToastActions();
+
+  const { data: configData, isLoading: isLoadingConfig } = useQuery({
+    queryKey: queryKeys.adapters.config("omnia"),
+    queryFn: () => adaptersApi.getConfig("omnia"),
+    enabled: open,
+  });
+
+  const [baseUrl, setBaseUrl] = useState("https://api.ntv.cloud2local.com/omnia/api");
+  const [model, setModel] = useState("qwen2.5:7b");
+  const [authToken, setAuthToken] = useState("");
+  const [temperature, setTemperature] = useState("0.8");
+  const [numCtx, setNumCtx] = useState("4096");
+  const [numPredict, setNumPredict] = useState("2048");
+  const [omniaMode, setOmniaMode] = useState<"permissive" | "read_only" | "restricted">("permissive");
+
+  const [testStatus, setTestStatus] = useState<{
+    tested: boolean;
+    ok: boolean;
+    message: string;
+    models?: string[];
+  } | null>(null);
+
+  useEffect(() => {
+    if (configData) {
+      if (typeof configData.baseUrl === "string" && configData.baseUrl.trim()) {
+        setBaseUrl(configData.baseUrl);
+      }
+      if (typeof configData.model === "string" && configData.model.trim()) {
+        setModel(configData.model);
+      }
+      if (typeof configData.omnia_auth_token === "string") {
+        setAuthToken(configData.omnia_auth_token);
+      }
+      if (configData.temperature !== undefined) {
+        setTemperature(String(configData.temperature));
+      }
+      if (configData.num_ctx !== undefined) {
+        setNumCtx(String(configData.num_ctx));
+      }
+      if (configData.num_predict !== undefined) {
+        setNumPredict(String(configData.num_predict));
+      }
+      if (typeof configData.omnia_mode === "string" && ["permissive", "read_only", "restricted"].includes(configData.omnia_mode)) {
+        setOmniaMode(configData.omnia_mode as "permissive" | "read_only" | "restricted");
+      }
+    }
+  }, [configData]);
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      adaptersApi.saveConfig("omnia", {
+        baseUrl: baseUrl.trim() || "https://api.ntv.cloud2local.com/omnia/api",
+        model: model.trim() || "qwen2.5:7b",
+        omnia_auth_token: authToken.trim() || undefined,
+        temperature: parseFloat(temperature) || 0.8,
+        num_ctx: parseInt(numCtx, 10) || 4096,
+        num_predict: parseInt(numPredict, 10) || 2048,
+        omnia_mode: omniaMode,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.adapters.config("omnia") });
+      queryClient.invalidateQueries({ queryKey: queryKeys.adapters.all });
+      pushToast({
+        title: "OmnIA Configuration Saved",
+        body: `Endpoint updated to ${baseUrl.trim() || "https://api.ntv.cloud2local.com/omnia/api"}`,
+        tone: "success",
+      });
+      onOpenChange(false);
+    },
+    onError: (err: Error) => {
+      pushToast({ title: "Save Failed", body: err.message, tone: "error" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: () => adaptersApi.testConnection("omnia", { baseUrl: baseUrl.trim() }),
+    onSuccess: (res) => {
+      setTestStatus({
+        tested: true,
+        ok: res.ok,
+        message: res.message,
+        models: res.models,
+      });
+    },
+    onError: (err: Error) => {
+      setTestStatus({
+        tested: true,
+        ok: false,
+        message: err.message,
+      });
+    },
+  });
+
+  const availableModels = [
+    { id: "qwen2.5:7b", label: "Qwen 2.5 7B (Tools + Function Calling)" },
+    { id: "llama3.1:8b", label: "Llama 3.1 8B (Tools + Function Calling)" },
+    { id: "deepseek-r1:8b", label: "DeepSeek R1 8B (Thinking)" },
+    { id: "mistral-nemo:12b", label: "Mistral Nemo 12B (Tools)" },
+    { id: "qwen2.5:3b", label: "Qwen 2.5 3B" },
+    { id: "gemma2:9b", label: "Gemma 2 9B" },
+  ];
+
+  const omniaTools = [
+    { name: "git_intelligence", label: "Git Intelligence", desc: "Branch changelogs, tag ranges, beta features, refactor analysis" },
+    { name: "ip_location", label: "IP & Geolocation", desc: "Runtime IP & geographical location inspector" },
+    { name: "call_api_endpoint", label: "REST / HTTP Client", desc: "Direct HTTP/REST endpoint requests" },
+    { name: "query_graphql", label: "GraphQL Client", desc: "GraphQL query and mutation execution" },
+    { name: "inspect_api_documentation", label: "API Schema Inspector", desc: "OpenAPI and GraphQL schema inspection" },
+    { name: "save_artifact", label: "Artifact & Report Publisher", desc: "Markdown security audits and reports publisher" },
+  ];
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Sliders className="h-4 w-4" />
+            </div>
+            <div>
+              <DialogTitle>OmnIA Adapter Configuration</DialogTitle>
+              <DialogDescription>
+                Configure the remote Sovereign AI Engine endpoint and integrated tool suite.
+              </DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+
+        {isLoadingConfig ? (
+          <div className="py-8 text-center text-sm text-muted-foreground">Loading configuration...</div>
+        ) : (
+          <div className="space-y-5 py-2">
+            {/* Remote Endpoint Notice */}
+            <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-3 text-xs text-blue-900 dark:text-blue-200 space-y-1">
+              <div className="flex items-center gap-1.5 font-medium">
+                <Globe className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                <span>Remote Sovereign Host (non del locale)</span>
+              </div>
+              <p className="text-muted-foreground">
+                All requests, model inference, and tool executions are routed through the remote OmnIA API endpoint without relying on local background daemons.
+              </p>
+            </div>
+
+            {/* Base URL */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="omniaBaseUrl" className="text-xs font-semibold">
+                  API Endpoint URL
+                </Label>
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={() => setBaseUrl("https://api.ntv.cloud2local.com/omnia/api")}
+                >
+                  Reset to default remote URL
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  id="omniaBaseUrl"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="https://api.ntv.cloud2local.com/omnia/api"
+                  className="font-mono text-xs"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={testMutation.isPending}
+                  onClick={() => testMutation.mutate()}
+                >
+                  {testMutation.isPending ? "Testing..." : "Test"}
+                </Button>
+              </div>
+              <p className="text-(length:--text-nano) text-muted-foreground">
+                Default: <code className="text-foreground">https://api.ntv.cloud2local.com/omnia/api</code>
+              </p>
+              {testStatus?.tested && (
+                <div
+                  className={cn(
+                    "flex items-center gap-2 rounded-md p-2 text-xs",
+                    testStatus.ok ? "bg-green-500/10 text-green-700 dark:text-green-300" : "bg-destructive/10 text-destructive"
+                  )}
+                >
+                  {testStatus.ok ? (
+                    <>
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      <span>{testStatus.message} {testStatus.models?.length ? `(${testStatus.models.length} models detected)` : ""}</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="h-4 w-4 shrink-0" />
+                      <span>{testStatus.message}</span>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Default Model */}
+            <div className="space-y-2">
+              <Label htmlFor="omniaModel" className="text-xs font-semibold">
+                Default Model
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  id="omniaModel"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="qwen2.5:7b"
+                  className="font-mono text-xs flex-1"
+                />
+              </div>
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {availableModels.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setModel(m.id)}
+                    className={cn(
+                      "rounded border px-2 py-0.5 text-(length:--text-nano) font-mono transition-colors",
+                      model === m.id
+                        ? "border-primary bg-primary/10 text-primary font-semibold"
+                        : "border-border text-muted-foreground hover:bg-muted"
+                    )}
+                  >
+                    {m.id}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Optional Bearer Token */}
+            <div className="space-y-2">
+              <Label htmlFor="omniaAuthToken" className="text-xs font-semibold">
+                Authorization Token / API Key (Optional)
+              </Label>
+              <Input
+                id="omniaAuthToken"
+                type="password"
+                value={authToken}
+                onChange={(e) => setAuthToken(e.target.value)}
+                placeholder="Bearer token if remote endpoint is authenticated"
+                className="font-mono text-xs"
+              />
+            </div>
+
+            {/* Model Generation Parameters */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="omniaNumCtx" className="text-xs font-semibold">
+                  Context (num_ctx)
+                </Label>
+                <Input
+                  id="omniaNumCtx"
+                  type="number"
+                  value={numCtx}
+                  onChange={(e) => setNumCtx(e.target.value)}
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="omniaTemp" className="text-xs font-semibold">
+                  Temperature
+                </Label>
+                <Input
+                  id="omniaTemp"
+                  type="number"
+                  step="0.05"
+                  value={temperature}
+                  onChange={(e) => setTemperature(e.target.value)}
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="omniaNumPredict" className="text-xs font-semibold">
+                  Max Tokens
+                </Label>
+                <Input
+                  id="omniaNumPredict"
+                  type="number"
+                  value={numPredict}
+                  onChange={(e) => setNumPredict(e.target.value)}
+                  className="font-mono text-xs"
+                />
+              </div>
+            </div>
+
+            {/* OmnIA Tool Suite */}
+            <div className="space-y-2.5 rounded-lg border border-border bg-muted/20 p-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 font-semibold text-xs text-foreground">
+                  <Shield className="h-3.5 w-3.5 text-primary" />
+                  <span>OmnIA Tool Suite & Execution Policy</span>
+                </div>
+                <Badge variant="secondary" className="text-(length:--text-nano) font-mono">
+                  {omniaTools.length} tools active
+                </Badge>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                {omniaTools.map((t) => (
+                  <div key={t.name} className="rounded border border-border/60 bg-background/80 p-2 text-xs space-y-0.5">
+                    <div className="font-mono font-medium text-foreground">{t.name}</div>
+                    <div className="text-(length:--text-nano) text-muted-foreground">{t.desc}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="pt-2 flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Execution mode:</span>
+                <div className="flex gap-1.5">
+                  {(["permissive", "read_only", "restricted"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setOmniaMode(mode)}
+                      className={cn(
+                        "rounded px-2 py-0.5 text-xs capitalize transition-colors",
+                        omniaMode === mode
+                          ? "bg-primary text-primary-foreground font-medium"
+                          : "border border-border text-muted-foreground hover:bg-muted"
+                      )}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => saveMutation.mutate()}
+            disabled={saveMutation.isPending}
+          >
+            {saveMutation.isPending ? "Saving..." : "Save Configuration"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function AdapterManager() {
   const { selectedCompany } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
 
@@ -266,6 +640,10 @@ export function AdapterManager() {
   const [installDialogOpen, setInstallDialogOpen] = useState(false);
   const [removeType, setRemoveType] = useState<string | null>(null);
   const [reinstallTarget, setReinstallTarget] = useState<AdapterInfo | null>(null);
+  const [configuringType, setConfiguringType] = useState<string | null>(() => {
+    const target = searchParams.get("configure") || searchParams.get("adapter");
+    return target === "omnia" ? "omnia" : null;
+  });
 
   useEffect(() => {
     setBreadcrumbs([
@@ -371,8 +749,16 @@ export function AdapterManager() {
     },
   });
 
-  const builtinAdapters = (adapters ?? []).filter((a) => a.source === "builtin");
-  const externalAdapters = (adapters ?? []).filter((a) => a.source === "external");
+  const sortWithOmniaFirst = <T extends { type: string }>(items: T[]): T[] => {
+    return [...items].sort((a, b) => {
+      if (a.type === "omnia") return -1;
+      if (b.type === "omnia") return 1;
+      return a.type.localeCompare(b.type);
+    });
+  };
+
+  const builtinAdapters = sortWithOmniaFirst((adapters ?? []).filter((a) => a.source === "builtin"));
+  const externalAdapters = sortWithOmniaFirst((adapters ?? []).filter((a) => a.source === "external"));
 
   // External adapters that override a builtin type.  The server only returns
   // one entry per type (the external), so we synthesize a builtin row for
@@ -527,6 +913,30 @@ export function AdapterManager() {
         </div>
       </div>
 
+      {/* OmnIA Sovereign Engine Configuration Card */}
+      <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-foreground text-sm">OmnIA Engine Configuration</span>
+            <Badge variant="secondary" className="font-mono text-(length:--text-nano) bg-primary/10 text-primary border-primary/20">
+              Active Host
+            </Badge>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Remote sovereign endpoint: <code className="text-xs font-mono font-medium text-foreground bg-muted/60 px-1.5 py-0.5 rounded">https://api.ntv.cloud2local.com/omnia/api</code> (Zero local Ollama dependency)
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="default"
+          className="gap-2 shrink-0"
+          onClick={() => setConfiguringType("omnia")}
+        >
+          <Sliders className="h-4 w-4" />
+          Configure OmnIA
+        </Button>
+      </div>
+
       {/* External adapters */}
       <section className="space-y-3">
         <div className="flex items-center gap-2">
@@ -570,6 +980,7 @@ export function AdapterManager() {
                   onRemove={(type) => setRemoveType(type)}
                   onReload={(type) => reloadMutation.mutate(type)}
                   onReinstall={!adapter.isLocalPath ? (type) => setReinstallTarget(adapter) : undefined}
+                  onConfigure={adapter.type === "omnia" ? () => setConfiguringType(adapter.type) : undefined}
                   isToggling={isBuiltinOverride ? overrideMutation.isPending : toggleMutation.isPending}
                   isReloading={reloadMutation.isPending}
                   isReinstalling={reinstallMutation.isPending}
@@ -603,6 +1014,7 @@ export function AdapterManager() {
                 canRemove={false}
                 onToggle={(type, disabled) => toggleMutation.mutate({ type, disabled })}
                 onRemove={() => {}}
+                onConfigure={adapter.type === "omnia" ? () => setConfiguringType(adapter.type) : undefined}
                 isToggling={isMutating}
               />
             ))}
@@ -684,6 +1096,13 @@ export function AdapterManager() {
           }
         }}
         onCancel={() => setReinstallTarget(null)}
+      />
+      {/* OmnIA Configuration Dialog */}
+      <OmniaConfigDialog
+        open={configuringType === "omnia"}
+        onOpenChange={(open) => {
+          if (!open) setConfiguringType(null);
+        }}
       />
     </div>
   );

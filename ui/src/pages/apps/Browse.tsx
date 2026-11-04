@@ -282,6 +282,9 @@ function connectorAction(
   href: string | null;
   title?: string;
 } {
+  if (row.slug === "omnia" || row.key.startsWith("adapter:")) {
+    return { label: "Configure", href: "/company/settings/instance/adapters?configure=omnia" };
+  }
   if (row.entry?.aiConnectionRouter) return { label: "Add connection pool", href: row.entry.availability?.available === false ? null : connectHrefFor(row.entry), title: row.entry.availability?.reason };
   if (row.aggregatorApp && isInstalled(row)) return { label: "Manage", href: null };
   const applicationId = row.applications[0]?.id ?? null;

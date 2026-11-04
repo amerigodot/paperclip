@@ -134,6 +134,17 @@ import {
   listPiModels,
 } from "@paperclipai/adapter-pi-local/server";
 import { agentConfigurationDoc as piAgentConfigurationDoc } from "@paperclipai/adapter-pi-local";
+import {
+  execute as omniaExecute,
+  testEnvironment as omniaTestEnvironment,
+  listOllamaModels as listOmniaModels,
+  refreshOllamaModels as refreshOmniaModels,
+  getConfigSchema as getOmniaConfigSchema,
+} from "@paperclipai/adapter-omnia/server";
+import {
+  agentConfigurationDoc as omniaAgentConfigurationDoc,
+  models as omniaModels,
+} from "@paperclipai/adapter-omnia";
 import { BUILTIN_ADAPTER_TYPES } from "./builtin-adapter-types.js";
 import { buildExternalAdapters } from "./plugin-loader.js";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
@@ -936,6 +947,20 @@ const piLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: piAgentConfigurationDoc,
 };
 
+const omniaAdapter: ServerAdapterModule = {
+  type: "omnia",
+  execute: omniaExecute,
+  testEnvironment: omniaTestEnvironment,
+  listModels: () => listOmniaModels(),
+  refreshModels: () => refreshOmniaModels(),
+  getConfigSchema: getOmniaConfigSchema,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  models: omniaModels,
+  agentConfigurationDoc: omniaAgentConfigurationDoc,
+};
+
 const adaptersByType = new Map<string, ServerAdapterModule>();
 
 // For builtin types that are overridden by an external adapter, we keep the
@@ -963,6 +988,7 @@ function registerBuiltInAdapters() {
     hermesGatewayAdapter,
     hermesLocalAdapter,
     openclawGatewayAdapter,
+    omniaAdapter,
     processAdapter,
     httpAdapter,
   ]) {

@@ -1,0 +1,16 @@
+export type {
+  AdapterModel,
+  AdapterEnvironmentCheck,
+  AdapterEnvironmentTestContext,
+  AdapterEnvironmentTestResult,
+  AdapterAgent,
+  AdapterRuntime,
+  AdapterExecutionContext,
+  AdapterExecutionResult,
+  ConfigFieldOption,
+  ConfigFieldSchema,
+  AdapterConfigSchema,
+  ServerAdapterModule,
+  CreateConfigValues,
+  TranscriptEntry,
+} from "@paperclipai/adapter-utils";

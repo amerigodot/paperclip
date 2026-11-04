@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import YAML from "yaml";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HelpCircle, PackageCheck } from "lucide-react";
+import { HelpCircle, PackageCheck, Wrench } from "lucide-react";
 import type {
   AgentDetail as AgentDetailRecord,
   ConnectionGrant,
@@ -11,6 +12,7 @@ import type {
 import { Link } from "@/lib/router";
 import { queryKeys } from "../lib/queryKeys";
 import { toolsApi } from "../api/tools";
+import { agentsApi } from "../api/agents";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { GithubIcon } from "@/components/icons/github-icon";
@@ -314,6 +316,237 @@ function InstallSaveStatusChip({
   return <span className="text-xs text-muted-foreground">Saved</span>;
 }
 
+export const DEFAULT_AGENT_TOOL_DEFS = [
+  {
+    name: "git_intelligence",
+    label: "Git Intelligence & Changelog Analyzer",
+    description: "Analyzes git history, generates branch changelogs, evaluates tag ranges, detects beta features, and inspects active refactorings.",
+    type: "git",
+    isReadOnly: true,
+    riskLevel: "low" as const,
+  },
+  {
+    name: "save_artifact",
+    label: "Artifact & Report Publisher",
+    description: "Publishes persistent Markdown reports, changelogs, and audit findings directly to Paperclip artifacts.",
+    type: "artifact",
+    isReadOnly: false,
+    riskLevel: "medium" as const,
+  },
+  {
+    name: "ip_location",
+    label: "IP & Geolocation Inspector",
+    description: "Inspects public IP and geographical location details of the agent runtime environment.",
+    type: "ip_location",
+    isReadOnly: true,
+    riskLevel: "low" as const,
+  },
+  {
+    name: "call_api_endpoint",
+    label: "REST / HTTP API Client",
+    description: "Executes HTTP requests to API endpoints with custom methods, query parameters, headers, and body payload.",
+    type: "http_request",
+    isReadOnly: false,
+    riskLevel: "medium" as const,
+  },
+  {
+    name: "query_graphql",
+    label: "GraphQL Client",
+    description: "Executes GraphQL queries and mutations against a target GraphQL endpoint with variables.",
+    type: "graphql",
+    isReadOnly: false,
+    riskLevel: "medium" as const,
+  },
+  {
+    name: "inspect_api_documentation",
+    label: "API Documentation Inspector",
+    description: "Inspects OpenAPI specifications or GraphQL schemas to discover available operations, endpoints, and types.",
+    type: "inspect_api",
+    isReadOnly: true,
+    riskLevel: "low" as const,
+  },
+];
+
+function AgentDedicatedToolsSection({
+  agent,
+  companyId,
+}: {
+  agent: AgentDetailRecord;
+  companyId: string;
+}) {
+  const queryClient = useQueryClient();
+  const adapterConfig = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+
+  const currentToolsMap = useMemo(() => {
+    const raw = adapterConfig.omnia_tools ?? adapterConfig.tools;
+    const map: Record<string, boolean> = {
+      git_intelligence: true,
+      save_artifact: true,
+      ip_location: true,
+      call_api_endpoint: true,
+      query_graphql: true,
+      inspect_api_documentation: true,
+    };
+
+    if (typeof raw === "string" && raw.trim()) {
+      try {
+        const parsed = YAML.parse(raw);
+        const list = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.tools)
+            ? parsed.tools
+            : null;
+        if (list) {
+          for (const item of list) {
+            if (item && item.name) {
+              map[item.name] = item.enabled !== false && String(item.enabled) !== "false";
+            }
+          }
+        }
+      } catch {
+        // fallback
+      }
+    }
+    return map;
+  }, [adapterConfig.omnia_tools, adapterConfig.tools]);
+
+  const [draftEnabled, setDraftEnabled] = useState<Record<string, boolean>>(currentToolsMap);
+  const [omniaMode, setOmniaMode] = useState<string>(
+    typeof adapterConfig.omnia_mode === "string" ? adapterConfig.omnia_mode : "permissive",
+  );
+
+  useEffect(() => {
+    setDraftEnabled(currentToolsMap);
+    if (typeof adapterConfig.omnia_mode === "string") {
+      setOmniaMode(adapterConfig.omnia_mode);
+    }
+  }, [currentToolsMap, adapterConfig.omnia_mode]);
+
+  const updateMutation = useMutation({
+    mutationFn: async ({
+      updatedMap,
+      mode,
+    }: {
+      updatedMap: Record<string, boolean>;
+      mode: string;
+    }) => {
+      const toolsToSave = DEFAULT_AGENT_TOOL_DEFS.map((tool) => ({
+        name: tool.name,
+        label: tool.label,
+        description: tool.description,
+        type: tool.type,
+        enabled: updatedMap[tool.name] ?? true,
+      }));
+
+      const newConfig = {
+        ...adapterConfig,
+        omnia_tools: YAML.stringify(toolsToSave),
+        omnia_mode: mode,
+      };
+
+      return agentsApi.update(agent.id, { adapterConfig: newConfig }, companyId);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agent.id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.tools.effectiveProfilesForAgent(companyId, agent.id) }),
+      ]);
+    },
+  });
+
+  const handleToggle = (toolName: string, enabled: boolean) => {
+    const nextMap = { ...draftEnabled, [toolName]: enabled };
+    setDraftEnabled(nextMap);
+    updateMutation.mutate({ updatedMap: nextMap, mode: omniaMode });
+  };
+
+  const handleModeChange = (mode: string) => {
+    setOmniaMode(mode);
+    updateMutation.mutate({ updatedMap: draftEnabled, mode });
+  };
+
+  return (
+    <section className="rounded-lg border border-border bg-card">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-3 py-2.5">
+        <div>
+          <div className="flex items-center gap-1.5">
+            <Wrench className="h-4 w-4 text-primary" />
+            <h3 className="text-sm font-semibold text-foreground">Dedicated agent tools</h3>
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Configure sovereign tools, Git intelligence, and execution capabilities specifically for {agent.name}.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {updateMutation.isPending ? (
+            <span className="text-xs text-muted-foreground">Saving...</span>
+          ) : updateMutation.isError ? (
+            <span className="text-xs text-destructive">Could not save</span>
+          ) : (
+            <span className="text-xs text-muted-foreground">Saved</span>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-3 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/30 p-2 text-xs">
+          <span className="text-muted-foreground">Execution mode for {agent.name}:</span>
+          <div className="flex gap-1.5">
+            {(["permissive", "read_only", "restricted"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => handleModeChange(mode)}
+                className={cn(
+                  "rounded px-2 py-0.5 text-xs capitalize transition-colors",
+                  omniaMode === mode
+                    ? "bg-primary text-primary-foreground font-medium"
+                    : "border border-border text-muted-foreground hover:bg-muted",
+                )}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="divide-y divide-border rounded-md border border-border">
+          {DEFAULT_AGENT_TOOL_DEFS.map((tool) => {
+            const isChecked = draftEnabled[tool.name] ?? true;
+            return (
+              <div key={tool.name} className="flex items-start justify-between gap-3 px-3 py-2.5">
+                <label className="flex items-start gap-3 flex-1 cursor-pointer">
+                  <Checkbox
+                    checked={isChecked}
+                    disabled={updateMutation.isPending}
+                    aria-label={`Enable ${tool.label} for ${agent.name}`}
+                    onCheckedChange={(checked) => handleToggle(tool.name, Boolean(checked))}
+                  />
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-mono font-medium text-foreground">{tool.name}</span>
+                      <span className="text-xs text-muted-foreground">({tool.label})</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{tool.description}</p>
+                  </div>
+                </label>
+                <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                  <CapabilityBadges
+                    isReadOnly={tool.isReadOnly}
+                    isWrite={!tool.isReadOnly}
+                    isDestructive={false}
+                  />
+                  <RiskBadge risk={tool.riskLevel} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 const POLICY_EFFECT_LABEL: Record<string, string> = {
   allow: "allow",
   block: "block",
@@ -497,12 +730,70 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
     return map;
   }, [connectionList]);
 
+  const isOmnia =
+    agent.adapterType === "omnia" ||
+    agent.adapterType === "ollama_local" ||
+    (agent.adapterConfig &&
+      typeof agent.adapterConfig === "object" &&
+      ("omnia_tools" in agent.adapterConfig ||
+        "tools" in agent.adapterConfig ||
+        "baseUrl" in agent.adapterConfig));
+
+  const adapterTools = useMemo<ToolCatalogEntry[]>(() => {
+    if (isOmnia) {
+      const config = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      const raw = config.omnia_tools ?? config.tools;
+      const enabledMap: Record<string, boolean> = {};
+      for (const t of DEFAULT_AGENT_TOOL_DEFS) {
+        enabledMap[t.name] = true;
+      }
+
+      if (typeof raw === "string" && raw.trim()) {
+        try {
+          const parsed = YAML.parse(raw);
+          const list = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed?.tools)
+              ? parsed.tools
+              : null;
+          if (list) {
+            for (const item of list) {
+              if (item && item.name) {
+                enabledMap[item.name] = item.enabled !== false && String(item.enabled) !== "false";
+              }
+            }
+          }
+        } catch {
+          // ignore parsing error
+        }
+      }
+
+      return DEFAULT_AGENT_TOOL_DEFS
+        .filter((t) => enabledMap[t.name] !== false)
+        .map((t) => ({
+          id: `omnia-tool:${t.name}`,
+          companyId,
+          connectionId: "omnia-adapter",
+          applicationId: "omnia",
+          toolName: t.name,
+          title: t.label,
+          description: t.description,
+          riskLevel: t.riskLevel,
+          isReadOnly: t.isReadOnly,
+          isWrite: !t.isReadOnly,
+          isDestructive: false,
+          status: "active",
+        } as ToolCatalogEntry));
+    }
+    return [];
+  }, [isOmnia, agent.adapterConfig, companyId]);
+
   const allowedTools = useMemo(
     () =>
-      [...(effective.data?.allowedTools ?? [])].sort((a, b) =>
+      [...(effective.data?.allowedTools ?? []), ...adapterTools].sort((a, b) =>
         a.toolName.localeCompare(b.toolName),
       ),
-    [effective.data?.allowedTools],
+    [effective.data?.allowedTools, adapterTools],
   );
 
   const permittedConnectionIds = useMemo(
@@ -553,7 +844,7 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
   const catalogLoading = catalogQueries.some((q) => q.isLoading);
 
   if (effective.isLoading) return <ToolsLoadingState label="Resolving effective access…" />;
-  if (effective.error) {
+  if (effective.error && adapterTools.length === 0) {
     return <ToolsErrorState error={effective.error} onRetry={() => effective.refetch()} />;
   }
 
@@ -561,6 +852,11 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
 
   return (
     <div className="space-y-4">
+      {effective.error && (
+        <InlineBanner tone="warning">
+          Could not load cloud tool profiles: {effective.error.message}. Showing adapter-configured tools.
+        </InlineBanner>
+      )}
       <EnforcementBanner
         tone="info"
         title="Effective access"
@@ -604,6 +900,13 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
           setInstallDraft((current) => ({ ...current, [connectionId]: installed }));
         }}
       />
+
+      {isOmnia && (
+        <AgentDedicatedToolsSection
+          agent={agent}
+          companyId={companyId}
+        />
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {/* Allowed tools table */}
@@ -649,7 +952,7 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
                         <RiskBadge risk={tool.riskLevel} />
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
-                        {connectionNameById.get(tool.connectionId) ?? "—"}
+                        {connectionNameById.get(tool.connectionId) ?? (tool.connectionId === "omnia-adapter" ? "OmnIA Adapter" : "—")}
                       </td>
                     </tr>
                   ))}
@@ -682,7 +985,9 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
               </div>
               {profiles.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
-                  No active profile applies to this agent, so it has no allowed tools.
+                  {adapterTools.length > 0
+                    ? `Default tools are provided directly by the ${agent.adapterType === "omnia" ? "OmnIA" : agent.adapterType} adapter.`
+                    : "No active profile applies to this agent, so it has no allowed tools."}
                 </p>
               ) : (
                 profiles.map((profile) => {
@@ -706,6 +1011,23 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
                 })
               )}
             </div>
+
+            {/* Adapter suite */}
+            {adapterTools.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                <div className="text-(length:--text-micro) font-medium uppercase tracking-wide text-muted-foreground">
+                  Adapter suite
+                </div>
+                <div className="rounded-md border border-border/70 px-2.5 py-2">
+                  <div className="text-xs font-medium text-foreground">
+                    OmnIA Sovereign AI Engine
+                  </div>
+                  <div className="mt-1 flex items-center gap-1.5 text-(length:--text-nano) text-muted-foreground">
+                    <span>{adapterTools.length} built-in tools declared (including Git Intelligence)</span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Policies mutating the allow list */}
             <div className="mt-3 space-y-1.5">
