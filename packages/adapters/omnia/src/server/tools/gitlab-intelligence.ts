@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -25,7 +26,9 @@ export type GitLabOperation =
   | "inspect_active_refactors"
   | "merge_requests_overview"
   | "pipeline_status"
-  | "gitlab_summary";
+  | "gitlab_summary"
+  | "get_file_content"
+  | "list_repository_tree";
 
 export interface GitLabToolOptions {
   operation: GitLabOperation;
@@ -42,6 +45,10 @@ export interface GitLabToolOptions {
   baseBranch?: string;
   branchPattern?: string;
   maxBranches?: number;
+  filePath?: string;
+  path?: string;
+  ref?: string;
+  recursive?: boolean;
   format?: "markdown" | "json";
 }
 
@@ -164,6 +171,34 @@ export function projectPathToApiUrl(
   return { projectPath, encodedPath, apiUrl };
 }
 
+export function resolveGitLabToken(token?: string): string | undefined {
+  if (token && token.trim()) return token.trim();
+  const envToken = process.env.GITLAB_TOKEN || process.env.GL_TOKEN || process.env.GITLAB_API_TOKEN;
+  if (envToken && envToken.trim()) return envToken.trim();
+
+  // Search upwards for .env in current and ancestor directories
+  let curr = process.cwd();
+  for (let i = 0; i < 6; i++) {
+    try {
+      const candidate = path.join(curr, ".env");
+      if (fsSync.existsSync(candidate)) {
+        const content = fsSync.readFileSync(candidate, "utf-8");
+        const match = content.match(/GITLAB_TOKEN\s*=\s*["']?([^"'\s\n\r]+)/);
+        if (match) {
+          process.env.GITLAB_TOKEN = match[1];
+          return match[1];
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const parent = path.dirname(curr);
+    if (parent === curr) break;
+    curr = parent;
+  }
+  return undefined;
+}
+
 export async function fetchGitLabApi<T = any>(
   endpoint: string,
   options: {
@@ -175,25 +210,7 @@ export async function fetchGitLabApi<T = any>(
   } = {},
 ): Promise<T> {
   const host = (options.host || process.env.GITLAB_HOST || "https://gitlab.com").replace(/\/+$/, "");
-  let token =
-    options.token ||
-    process.env.GITLAB_TOKEN ||
-    process.env.GL_TOKEN ||
-    process.env.GITLAB_API_TOKEN;
-
-  if (!token) {
-    try {
-      const envPath = path.resolve(process.cwd(), ".env");
-      const content = await fs.readFile(envPath, "utf-8");
-      const match = content.match(/GITLAB_TOKEN\s*=\s*["']?([^"'\s\n\r]+)/);
-      if (match) {
-        token = match[1];
-        process.env.GITLAB_TOKEN = token;
-      }
-    } catch {
-      // ignore
-    }
-  }
+  const token = resolveGitLabToken(options.token);
 
   let urlStr = endpoint.startsWith("http://") || endpoint.startsWith("https://")
     ? endpoint
@@ -492,6 +509,89 @@ export async function fetchProjectPipelines(
     }
     throw err;
   }
+}
+
+export async function fetchRawFile(
+  projectPathOrId: string | number,
+  filePath: string,
+  ref = "main",
+  token?: string,
+  host = "https://gitlab.com",
+): Promise<string> {
+  const encodedProj =
+    typeof projectPathOrId === "number"
+      ? projectPathOrId
+      : encodeURIComponent(normalizeGitLabProjectPath(String(projectPathOrId)));
+  const cleanFilePath = filePath.trim().replace(/^\/+/, "");
+  const encodedPath = encodeURIComponent(cleanFilePath);
+
+  const urlStr = `${host}/api/v4/projects/${encodedProj}/repository/files/${encodedPath}/raw?ref=${encodeURIComponent(ref)}`;
+  const headers: Record<string, string> = {
+    "User-Agent": "Paperclip-GitLab-Intelligence/1.0",
+  };
+  const resolvedToken = resolveGitLabToken(token);
+  if (resolvedToken) {
+    headers["PRIVATE-TOKEN"] = resolvedToken;
+    headers["Authorization"] = `Bearer ${resolvedToken}`;
+  }
+  const res = await fetch(urlStr, { headers });
+  if (!res.ok) {
+    let errBody = "";
+    try {
+      errBody = await res.text();
+    } catch {
+      // ignore
+    }
+    throw new Error(`GitLab raw file error (${res.status} ${res.statusText}) for file "${cleanFilePath}" on ref "${ref}": ${errBody}`);
+  }
+  return await res.text();
+}
+
+export interface GitLabTreeItem {
+  id: string;
+  name: string;
+  type: "tree" | "blob" | "submodule";
+  path: string;
+  mode: string;
+}
+
+export async function fetchProjectTree(
+  projectPathOrId: string | number,
+  path?: string,
+  ref = "main",
+  recursive = true,
+  token?: string,
+  host = "https://gitlab.com",
+): Promise<GitLabTreeItem[]> {
+  const encodedProj =
+    typeof projectPathOrId === "number"
+      ? projectPathOrId
+      : encodeURIComponent(normalizeGitLabProjectPath(String(projectPathOrId)));
+
+  const params: Record<string, string | number | boolean> = {
+    ref,
+    per_page: 100,
+  };
+  if (path && path.trim()) {
+    params.path = path.trim().replace(/^\/+/, "");
+  }
+  if (recursive) {
+    params.recursive = true;
+  }
+
+  const items = await fetchGitLabApi<any[]>(`/projects/${encodedProj}/repository/tree`, {
+    token,
+    host,
+    params,
+  });
+
+  return (items || []).map((item) => ({
+    id: item.id,
+    name: item.name,
+    type: item.type,
+    path: item.path,
+    mode: item.mode,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -931,12 +1031,83 @@ export async function executeGitLabIntelligence(
     baseBranch: typeof args.baseBranch === "string" ? args.baseBranch.trim() : undefined,
     branchPattern: typeof args.branchPattern === "string" ? args.branchPattern.trim() : undefined,
     maxBranches: typeof args.maxBranches === "number" ? args.maxBranches : undefined,
+    filePath: typeof args.filePath === "string" ? args.filePath.trim() : typeof args.file === "string" ? (args.file as string).trim() : undefined,
+    path: typeof args.path === "string" ? args.path.trim() : typeof args.subpath === "string" ? (args.subpath as string).trim() : undefined,
+    ref: typeof args.ref === "string" ? args.ref.trim() : undefined,
+    recursive: args.recursive !== undefined ? Boolean(args.recursive) : undefined,
     format: args.format as any,
   };
 
   switch (op) {
     case "generate_three_tier_changelog":
       return generateThreeTierChangelog(toolOptions);
+
+    case "get_file_content":
+    case "read_file" as any:
+    case "get_file" as any:
+    case "cat_file" as any: {
+      const targetProj = projectId || projectPath;
+      if (!targetProj) throw new Error("GitLab projectPath or projectId is required for get_file_content.");
+      const file = toolOptions.filePath || (args.path as string) || (args.file as string) || "";
+      if (!file) throw new Error("Argument 'filePath' is required for get_file_content.");
+      const ref = toolOptions.ref || toolOptions.baseBranch || "main";
+      const content = await fetchRawFile(targetProj, file, ref, gitlabToken, gitlabHost);
+      const ext = path.extname(file).replace(/^\./, "") || "text";
+      const md = [
+        `### 📄 File: \`${file}\` (ref: \`${ref}\`)`,
+        "",
+        `\`\`\`${ext}`,
+        content,
+        `\`\`\``,
+      ].join("\n");
+      return {
+        operation: "get_file_content",
+        success: true,
+        repo: String(targetProj),
+        summary: `Fetched file ${file} (${content.length} chars) from ref ${ref}.`,
+        markdown: md,
+        data: {
+          project: targetProj,
+          filePath: file,
+          ref,
+          content,
+          sizeBytes: Buffer.byteLength(content, "utf-8"),
+        },
+        executionMs: 0,
+      };
+    }
+
+    case "list_repository_tree":
+    case "list_files" as any:
+    case "repository_tree" as any:
+    case "ls_files" as any:
+    case "tree" as any: {
+      const targetProj = projectId || projectPath;
+      if (!targetProj) throw new Error("GitLab projectPath or projectId is required for list_repository_tree.");
+      const ref = toolOptions.ref || toolOptions.baseBranch || "main";
+      const treePath = toolOptions.path || (args.subpath as string) || undefined;
+      const recursive = toolOptions.recursive !== false;
+      const items = await fetchProjectTree(targetProj, treePath, ref, recursive, gitlabToken, gitlabHost);
+      const lines = [
+        `# 📂 Repository Tree: \`${targetProj}\` (ref: \`${ref}\`${treePath ? `, path: \`${treePath}\`` : ""})`,
+        "",
+        `| Tipo | Percorso |`,
+        `| :--- | :--- |`,
+      ];
+      for (const item of items) {
+        const icon = item.type === "tree" ? "📁" : "📄";
+        lines.push(`| ${icon} ${item.type} | \`${item.path}\` |`);
+      }
+      return {
+        operation: "list_repository_tree",
+        success: true,
+        repo: String(targetProj),
+        summary: `Listed ${items.length} files/directories from ${targetProj} (ref: ${ref}).`,
+        markdown: lines.join("\n"),
+        data: items,
+        executionMs: 0,
+      };
+    }
 
     case "merge_requests_overview": {
       const targetProj = projectId || projectPath;
@@ -1024,7 +1195,7 @@ export const GITLAB_INTELLIGENCE_TOOL_DEFINITION = {
   function: {
     name: "gitlab_intelligence",
     description:
-      "Advanced GitLab intelligence tool to inspect repositories via remote GitLab REST API v4 and local Git. Categorizes officially released tags on main, detects upcoming beta features, inspects active refactorings (feat/*, refactor/*), analyzes merge conflict risks, and reviews open merge requests & CI pipelines.",
+      "Advanced GitLab intelligence tool to inspect repositories via remote GitLab REST API v4 and local Git. Categorizes officially released tags on main, detects upcoming beta features, inspects active refactorings (feat/*, refactor/*), analyzes merge conflict risks, reviews open merge requests & CI pipelines, fetches raw file content, and lists directory trees.",
     parameters: {
       type: "object",
       properties: {
@@ -1032,6 +1203,8 @@ export const GITLAB_INTELLIGENCE_TOOL_DEFINITION = {
           type: "string",
           enum: [
             "generate_three_tier_changelog",
+            "get_file_content",
+            "list_repository_tree",
             "merge_requests_overview",
             "pipeline_status",
             "gitlab_summary",
@@ -1039,6 +1212,8 @@ export const GITLAB_INTELLIGENCE_TOOL_DEFINITION = {
           description:
             "GitLab operation to perform:\n" +
             "- 'generate_three_tier_changelog': Generates the full 3-tier report: 1) Officially released tags on main, 2) Upcoming features in beta branch, 3) Active work in progress (beta + refactor/*, feat/*) with conflict overlap detection.\n" +
+            "- 'get_file_content': Reads verbatim raw content of a specific file in the repository (requires 'filePath', optional 'ref').\n" +
+            "- 'list_repository_tree': Lists files and directories in the repository (optional 'path', optional 'ref', optional 'recursive').\n" +
             "- 'merge_requests_overview': Lists and analyzes open merge requests, drafts, reviewers, and target branches.\n" +
             "- 'pipeline_status': Checks CI/CD pipeline health and commit statuses.\n" +
             "- 'gitlab_summary': Overview of GitLab project metadata, stars, visibility, and activity.",
@@ -1050,6 +1225,22 @@ export const GITLAB_INTELLIGENCE_TOOL_DEFINITION = {
         projectId: {
           type: "string",
           description: "GitLab numeric project ID (optional if projectPath is provided).",
+        },
+        filePath: {
+          type: "string",
+          description: "Repository file path to inspect (e.g. 'package.json', 'app.vue', 'src/hooks.ts'). Used with 'get_file_content'.",
+        },
+        path: {
+          type: "string",
+          description: "Subdirectory path to list files from (e.g. 'components', 'locales'). Used with 'list_repository_tree'.",
+        },
+        ref: {
+          type: "string",
+          description: "Branch, tag, or commit SHA to inspect files or tree from (default: 'main').",
+        },
+        recursive: {
+          type: "boolean",
+          description: "Whether to list repository tree files recursively (default: true).",
         },
         baseBranch: {
           type: "string",

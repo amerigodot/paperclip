@@ -74,6 +74,8 @@ describe("GitLab Intelligence Tool", () => {
       expect(GITLAB_INTELLIGENCE_TOOL_DEFINITION.function.parameters.required).toContain("operation");
       const ops = GITLAB_INTELLIGENCE_TOOL_DEFINITION.function.parameters.properties.operation.enum;
       expect(ops).toContain("generate_three_tier_changelog");
+      expect(ops).toContain("get_file_content");
+      expect(ops).toContain("list_repository_tree");
       expect(ops).toContain("merge_requests_overview");
       expect(ops).toContain("pipeline_status");
       expect(ops).toContain("gitlab_summary");
@@ -94,6 +96,25 @@ describe("GitLab Intelligence Tool", () => {
       expect(result.markdown).toContain("1. Quello che è stato rilasciato ufficialmente");
       expect(result.markdown).toContain("2. Quello che si sta per rilasciare");
       expect(result.markdown).toContain("3. Quello su cui si sta lavorando");
-    });
+    }, 15000);
+
+    it("handles get_file_content and list_repository_tree operations", async () => {
+      const treeRes = await executeGitLabIntelligence({
+        operation: "list_repository_tree",
+        projectPath: "netvolution/chibi/identity-proxy",
+      });
+      expect(treeRes.operation).toBe("list_repository_tree");
+      expect(treeRes.success).toBe(true);
+      expect(treeRes.markdown).toContain("Repository Tree");
+
+      const fileRes = await executeGitLabIntelligence({
+        operation: "get_file_content",
+        projectPath: "netvolution/chibi/identity-proxy",
+        filePath: "package.json",
+      });
+      expect(fileRes.operation).toBe("get_file_content");
+      expect(fileRes.success).toBe(true);
+      expect(fileRes.markdown).toContain("package.json");
+    }, 15000);
   });
 });
