@@ -15,14 +15,29 @@ describe("GitLab Intelligence Tool", () => {
       );
       expect(normalizeGitLabProjectPath("/gitlab-org/gitlab/")).toBe("gitlab-org/gitlab");
       expect(normalizeGitLabProjectPath("org/repo.git")).toBe("org/repo");
+      expect(normalizeGitLabProjectPath("netvolution/chibi/identity-proxy;")).toBe(
+        "netvolution/chibi/identity-proxy",
+      );
     });
 
-    it("extracts path from full GitLab web URLs", () => {
+    it("extracts path from full GitLab web URLs and variations", () => {
       expect(
         normalizeGitLabProjectPath("https://gitlab.com/netvolution/chibi/identity-proxy"),
       ).toBe("netvolution/chibi/identity-proxy");
       expect(
+        normalizeGitLabProjectPath("https://gitlab.com/netvolution/chibi/identity-proxy;"),
+      ).toBe("netvolution/chibi/identity-proxy");
+      expect(
         normalizeGitLabProjectPath("https://gitlab.com/netvolution/chibi/identity-proxy.git"),
+      ).toBe("netvolution/chibi/identity-proxy");
+      expect(
+        normalizeGitLabProjectPath("git@gitlab.com:netvolution/chibi/identity-proxy.git"),
+      ).toBe("netvolution/chibi/identity-proxy");
+      expect(
+        normalizeGitLabProjectPath("gitlab.com/netvolution/chibi/identity-proxy"),
+      ).toBe("netvolution/chibi/identity-proxy");
+      expect(
+        normalizeGitLabProjectPath("https://gitlab.com/netvolution/chibi/identity-proxy/-/tree/main"),
       ).toBe("netvolution/chibi/identity-proxy");
       expect(
         normalizeGitLabProjectPath("http://gitlab.internal.corp/team/subgroup/project/"),

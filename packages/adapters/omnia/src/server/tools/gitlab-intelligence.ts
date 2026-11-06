@@ -120,21 +120,48 @@ export interface GitLabPipelineInfo {
 
 export function normalizeGitLabProjectPath(raw: string): string {
   let clean = raw.trim();
-  // Strip trailing slashes and .git
-  clean = clean.replace(/\.git\/?$/, "").replace(/\/+$/, "");
 
-  // If full URL, extract path
+  // Strip trailing punctuation like semicolons, commas, dots, and quotes
+  clean = clean.replace(/^[<"'(]+|[>"');,]+$/g, "").trim();
+
+  // Handle SSH format: git@gitlab.com:group/subgroup/project.git
+  const sshMatch = clean.match(/^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+:(.+)$/);
+  if (sshMatch) {
+    clean = sshMatch[1];
+  }
+
+  // Handle web URL or domain-prefixed paths: https://gitlab.com/group/project
   if (clean.startsWith("http://") || clean.startsWith("https://")) {
     try {
       const parsed = new URL(clean);
-      clean = parsed.pathname.replace(/^\//, "");
+      clean = parsed.pathname;
     } catch {
-      // ignore
+      clean = clean.replace(/^https?:\/\/[^/]+\/?/, "");
     }
+  } else if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\//.test(clean)) {
+    // e.g. gitlab.com/netvolution/chibi/identity-proxy
+    clean = clean.replace(/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\//, "");
   }
 
-  // Strip leading slash
-  return clean.replace(/^\//, "");
+  // Strip GitLab subpath features (e.g. /-/tree/main, /-/blob/..., /-/commits/...)
+  clean = clean.replace(/\/-(\/.*)?$/, "");
+
+  // Strip .git extension and trailing slashes
+  clean = clean.replace(/\.git\/?$/, "").replace(/\/+$/, "");
+
+  // Strip leading slashes
+  return clean.replace(/^\/+/, "");
+}
+
+export function projectPathToApiUrl(
+  projectPathOrUrl: string,
+  host = "https://gitlab.com",
+): { projectPath: string; encodedPath: string; apiUrl: string } {
+  const projectPath = normalizeGitLabProjectPath(projectPathOrUrl);
+  const encodedPath = encodeURIComponent(projectPath);
+  const baseHost = (host || "https://gitlab.com").replace(/\/+$/, "");
+  const apiUrl = `${baseHost}/api/v4/projects/${encodedPath}`;
+  return { projectPath, encodedPath, apiUrl };
 }
 
 export async function fetchGitLabApi<T = any>(
@@ -221,24 +248,40 @@ export async function fetchProjectMetadata(
   token?: string,
   host?: string,
 ): Promise<GitLabProjectMeta> {
+  const normPath = normalizeGitLabProjectPath(String(projectPathOrId));
   const encodedPath =
     typeof projectPathOrId === "number"
       ? projectPathOrId
-      : encodeURIComponent(normalizeGitLabProjectPath(String(projectPathOrId)));
+      : encodeURIComponent(normPath);
 
-  const p = await fetchGitLabApi(`/projects/${encodedPath}`, { token, host });
-  return {
-    id: p.id,
-    name: p.name,
-    pathWithNamespace: p.path_with_namespace,
-    defaultBranch: p.default_branch || "main",
-    visibility: p.visibility,
-    webUrl: p.web_url,
-    description: p.description || "",
-    starCount: p.star_count || 0,
-    forksCount: p.forks_count || 0,
-    lastActivityAt: p.last_activity_at || "",
-  };
+  try {
+    const p = await fetchGitLabApi(`/projects/${encodedPath}`, { token, host });
+    return {
+      id: p.id,
+      name: p.name,
+      pathWithNamespace: p.path_with_namespace,
+      defaultBranch: p.default_branch || "main",
+      visibility: p.visibility,
+      webUrl: p.web_url,
+      description: p.description || "",
+      starCount: p.star_count || 0,
+      forksCount: p.forks_count || 0,
+      lastActivityAt: p.last_activity_at || "",
+    };
+  } catch {
+    return {
+      id: 0,
+      name: normPath.split("/").pop() || normPath,
+      pathWithNamespace: normPath,
+      defaultBranch: "main",
+      visibility: "private",
+      webUrl: `https://gitlab.com/${normPath}`,
+      description: "GitLab repository (accessed via repository read permissions)",
+      starCount: 0,
+      forksCount: 0,
+      lastActivityAt: new Date().toISOString(),
+    };
+  }
 }
 
 export async function fetchProjectBranches(
@@ -618,14 +661,24 @@ export async function generateThreeTierChangelog(
       const branches = await fetchProjectBranches(targetProject, gitlabToken, gitlabHost);
       for (const b of branches) {
         if (b.name === baseBranch) continue;
+        let modifiedFiles: string[] = [];
+        let aheadCount = 0;
+        try {
+          const comp = await fetchProjectCompare(targetProject, baseBranch, b.name, gitlabToken, gitlabHost);
+          modifiedFiles = comp.diffs.map((d) => d.newPath || d.oldPath);
+          aheadCount = comp.commits.length;
+        } catch {
+          // ignore compare failure
+        }
+
         tier3ActiveBranches.push({
           name: b.name,
-          ahead: 0,
+          ahead: aheadCount,
           behind: 0,
           lastCommit: `\`${b.commit.shortId}\` - *${b.commit.title}* (@${b.commit.authorName})`,
-          subsystems: [],
+          subsystems: mapTouchedSubsystems(modifiedFiles),
           isRefactor: b.name.includes("refactor") || b.commit.title.toLowerCase().includes("refactor"),
-          modifiedFiles: [],
+          modifiedFiles,
         });
       }
     } catch {
