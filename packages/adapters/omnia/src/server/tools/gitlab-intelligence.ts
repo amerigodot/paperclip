@@ -175,11 +175,25 @@ export async function fetchGitLabApi<T = any>(
   } = {},
 ): Promise<T> {
   const host = (options.host || process.env.GITLAB_HOST || "https://gitlab.com").replace(/\/+$/, "");
-  const token =
+  let token =
     options.token ||
     process.env.GITLAB_TOKEN ||
     process.env.GL_TOKEN ||
     process.env.GITLAB_API_TOKEN;
+
+  if (!token) {
+    try {
+      const envPath = path.resolve(process.cwd(), ".env");
+      const content = await fs.readFile(envPath, "utf-8");
+      const match = content.match(/GITLAB_TOKEN\s*=\s*["']?([^"'\s\n\r]+)/);
+      if (match) {
+        token = match[1];
+        process.env.GITLAB_TOKEN = token;
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   let urlStr = endpoint.startsWith("http://") || endpoint.startsWith("https://")
     ? endpoint
@@ -269,11 +283,20 @@ export async function fetchProjectMetadata(
       lastActivityAt: p.last_activity_at || "",
     };
   } catch {
+    let defBranch = "main";
+    try {
+      const branches = await fetchGitLabApi<any[]>(`/projects/${encodedPath}/repository/branches`, { token, host });
+      const def = branches?.find((b) => b.default);
+      if (def?.name) defBranch = def.name;
+    } catch {
+      // ignore
+    }
+
     return {
       id: 0,
       name: normPath.split("/").pop() || normPath,
       pathWithNamespace: normPath,
-      defaultBranch: "main",
+      defaultBranch: defBranch,
       visibility: "private",
       webUrl: `https://gitlab.com/${normPath}`,
       description: "GitLab repository (accessed via repository read permissions)",
@@ -406,27 +429,34 @@ export async function fetchProjectMergeRequests(
       ? projectPathOrId
       : encodeURIComponent(normalizeGitLabProjectPath(String(projectPathOrId)));
 
-  const mrs = await fetchGitLabApi<any[]>(`/projects/${encoded}/merge_requests`, {
-    token,
-    host,
-    params: { state, per_page: 50 },
-  });
+  try {
+    const mrs = await fetchGitLabApi<any[]>(`/projects/${encoded}/merge_requests`, {
+      token,
+      host,
+      params: { state, per_page: 50 },
+    });
 
-  return (mrs || []).map((m) => ({
-    id: m.id,
-    iid: m.iid,
-    title: m.title,
-    description: m.description || "",
-    state: m.state,
-    sourceBranch: m.source_branch,
-    targetBranch: m.target_branch,
-    author: m.author?.username || m.author?.name || "Unknown",
-    webUrl: m.web_url,
-    draft: Boolean(m.draft || m.work_in_progress),
-    labels: Array.isArray(m.labels) ? m.labels : [],
-    createdAt: m.created_at,
-    updatedAt: m.updated_at,
-  }));
+    return (mrs || []).map((m) => ({
+      id: m.id,
+      iid: m.iid,
+      title: m.title,
+      description: m.description || "",
+      state: m.state,
+      sourceBranch: m.source_branch,
+      targetBranch: m.target_branch,
+      author: m.author?.username || m.author?.name || "Unknown",
+      webUrl: m.web_url,
+      draft: Boolean(m.draft || m.work_in_progress),
+      labels: Array.isArray(m.labels) ? m.labels : [],
+      createdAt: m.created_at,
+      updatedAt: m.updated_at,
+    }));
+  } catch (err: any) {
+    if (String(err?.message || "").includes("granular_scope") || String(err?.message || "").includes("403")) {
+      return [];
+    }
+    throw err;
+  }
 }
 
 export async function fetchProjectPipelines(
@@ -440,21 +470,28 @@ export async function fetchProjectPipelines(
       ? projectPathOrId
       : encodeURIComponent(normalizeGitLabProjectPath(String(projectPathOrId)));
 
-  const pipelines = await fetchGitLabApi<any[]>(`/projects/${encoded}/pipelines`, {
-    token,
-    host,
-    params: { per_page: 10, ref },
-  });
+  try {
+    const pipelines = await fetchGitLabApi<any[]>(`/projects/${encoded}/pipelines`, {
+      token,
+      host,
+      params: { per_page: 10, ref },
+    });
 
-  return (pipelines || []).map((p) => ({
-    id: p.id,
-    status: p.status,
-    ref: p.ref,
-    sha: p.sha,
-    webUrl: p.web_url,
-    createdAt: p.created_at,
-    updatedAt: p.updated_at,
-  }));
+    return (pipelines || []).map((p) => ({
+      id: p.id,
+      status: p.status,
+      ref: p.ref,
+      sha: p.sha,
+      webUrl: p.web_url,
+      createdAt: p.created_at,
+      updatedAt: p.updated_at,
+    }));
+  } catch (err: any) {
+    if (String(err?.message || "").includes("granular_scope") || String(err?.message || "").includes("403")) {
+      return [];
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,15 +553,15 @@ export async function generateThreeTierChangelog(
     modifiedFiles: string[];
   }> = [];
 
-  // Check if we can execute locally via local git clone
+  // Check if we should execute locally: only if repoPath has a .git directory and NO remote projectPath/projectId was specified
   let isLocalGit = false;
   let targetCwd = repoPath || "";
-  if (repoPath) {
+  if (repoPath && !projectPath && !projectId) {
     try {
-      await fs.access(repoPath);
+      await fs.access(path.join(repoPath, ".git"));
       isLocalGit = true;
     } catch {
-      // not local
+      // not a local git repo
     }
   }
 
@@ -848,18 +885,34 @@ export async function executeGitLabIntelligence(
     (typeof args.host === "string" && args.host.trim()) ||
     undefined;
 
-  const gitlabToken =
+  // Resolve GitLab token from args, context, context.env, or process.env
+  let gitlabToken =
     (typeof args.gitlabToken === "string" && args.gitlabToken.trim()) ||
     (typeof args.token === "string" && args.token.trim()) ||
-    (typeof context?.GITLAB_TOKEN === "string" && context.GITLAB_TOKEN.trim()) ||
-    undefined;
+    (typeof context?.GITLAB_TOKEN === "string" && context.GITLAB_TOKEN.trim());
 
+  if (!gitlabToken && context?.env && typeof context.env === "object") {
+    const envObj = context.env as Record<string, unknown>;
+    const tokenVal = envObj.GITLAB_TOKEN || envObj.gitlab_token || envObj.GL_TOKEN;
+    if (typeof tokenVal === "string") {
+      gitlabToken = tokenVal.trim();
+    } else if (tokenVal && typeof tokenVal === "object" && "value" in tokenVal) {
+      gitlabToken = String((tokenVal as any).value).trim();
+    }
+  }
+
+  if (!gitlabToken) {
+    gitlabToken = process.env.GITLAB_TOKEN || process.env.GL_TOKEN || process.env.GITLAB_API_TOKEN;
+  }
+
+  // Only consider repoPath if explicitly passed in args, or if no remote projectPath/projectId is provided
   const repoPath =
     (typeof args.repoPath === "string" && args.repoPath.trim()) ||
     (typeof args.repo === "string" && args.repo.trim()) ||
-    (typeof context?.workspacePath === "string" && context.workspacePath.trim()) ||
-    (typeof context?.cwd === "string" && context.cwd.trim()) ||
-    undefined;
+    (!projectPath && !projectId
+      ? (typeof context?.workspacePath === "string" && context.workspacePath.trim()) ||
+        (typeof context?.cwd === "string" && context.cwd.trim())
+      : undefined);
 
   const toolOptions: GitLabToolOptions = {
     operation: op,
@@ -888,10 +941,14 @@ export async function executeGitLabIntelligence(
       if (!targetProj) throw new Error("GitLab projectPath or projectId is required for merge_requests_overview.");
       const mrs = await fetchProjectMergeRequests(targetProj, gitlabToken, gitlabHost);
       const lines = [`# 🔀 GitLab Open Merge Requests (${mrs.length})`, ""];
-      for (const m of mrs) {
-        const draftBadge = m.draft ? "*(Draft/WIP)* " : "";
-        lines.push(`- **!${m.iid}** ${draftBadge}[${m.title}](${m.webUrl})`);
-        lines.push(`  - Branch: \`${m.sourceBranch}\` → \`${m.targetBranch}\` | Autore: @${m.author}`);
+      if (mrs.length === 0) {
+        lines.push(`*Nessuna merge request aperta rilevata sul repository.*`);
+      } else {
+        for (const m of mrs) {
+          const draftBadge = m.draft ? "*(Draft/WIP)* " : "";
+          lines.push(`- **!${m.iid}** ${draftBadge}[${m.title}](${m.webUrl})`);
+          lines.push(`  - Branch: \`${m.sourceBranch}\` → \`${m.targetBranch}\` | Autore: @${m.author}`);
+        }
       }
       return {
         operation: "merge_requests_overview",
@@ -909,9 +966,13 @@ export async function executeGitLabIntelligence(
       if (!targetProj) throw new Error("GitLab projectPath or projectId is required for pipeline_status.");
       const pipelines = await fetchProjectPipelines(targetProj, gitlabToken, gitlabHost, toolOptions.baseBranch);
       const lines = [`# ⚙️ GitLab Pipeline Health (${pipelines.length} most recent)`, ""];
-      for (const p of pipelines) {
-        const badge = p.status === "success" ? "✅ Success" : p.status === "failed" ? "❌ Failed" : `🔄 ${p.status}`;
-        lines.push(`- **Pipeline #${p.id}**: ${badge} on \`${p.ref}\` (\`${p.sha.slice(0, 8)}\`)`);
+      if (pipelines.length === 0) {
+        lines.push(`*Nessuna pipeline CI/CD rilevata o scope pipeline non presente sul token.*`);
+      } else {
+        for (const p of pipelines) {
+          const badge = p.status === "success" ? "✅ Success" : p.status === "failed" ? "❌ Failed" : `🔄 ${p.status}`;
+          lines.push(`- **Pipeline #${p.id}**: ${badge} on \`${p.ref}\` (\`${p.sha.slice(0, 8)}\`)`);
+        }
       }
       return {
         operation: "pipeline_status",
