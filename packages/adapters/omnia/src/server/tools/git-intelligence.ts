@@ -78,7 +78,7 @@ export interface GitSummaryOptions {
 }
 
 export interface GitToolResult {
-  operation: GitOperation;
+  operation: GitOperation | string;
   success: boolean;
   repo: string;
   summary: string;

@@ -401,6 +401,7 @@ function OmniaConfigDialog({
     : defaultOmniaModels;
 
   const omniaTools = [
+    { name: "gitlab_intelligence", label: "GitLab Intelligence", desc: "Remote REST v4 GitLab inspection, releases, beta preview, MRs & pipelines" },
     { name: "git_intelligence", label: "Git Intelligence", desc: "Branch changelogs, tag ranges, beta features, refactor analysis" },
     { name: "ip_location", label: "IP & Geolocation", desc: "Runtime IP & geographical location inspector" },
     { name: "call_api_endpoint", label: "REST / HTTP Client", desc: "Direct HTTP/REST endpoint requests" },

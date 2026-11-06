@@ -185,6 +185,12 @@ export function getConfigSchema(): AdapterConfigSchema {
   type: git
   enabled: true
 
+- name: gitlab_intelligence
+  label: "GitLab Intelligence & Repository Inspector"
+  description: "Deep inspection of GitLab repositories (remote API v4 & local git): branch comparison, tag releases on main, beta feature preview, active refactorings detection, merge requests, and changelog generation."
+  type: gitlab
+  enabled: true
+
 # Example Custom Tool:
 # - name: github_issues
 #   label: "GitHub Issues API"

@@ -234,7 +234,13 @@ export function parseConfiguredTools(config: Record<string, unknown>): OmniaTool
     .map((t) => {
       const normalizedName = t.name.trim();
       const enabled = t.enabled !== false && String(t.enabled) !== "false";
-      const type: ToolType = (t.type || (normalizedName.includes("ip") ? "ip_location" : normalizedName.includes("graphql") ? "graphql" : normalizedName.includes("git") ? "git" : "http_request")) as ToolType;
+      const type: ToolType = (t.type || (
+        normalizedName.includes("ip") ? "ip_location" :
+        normalizedName.includes("graphql") ? "graphql" :
+        normalizedName.includes("gitlab") ? "gitlab" :
+        normalizedName.includes("git") ? "git" :
+        "http_request"
+      )) as ToolType;
 
       // Support access properties both at root level and inside nested access object
       const rootUrl = (t as any).url as string | undefined;
@@ -319,6 +325,16 @@ export function buildOllamaTools(tools: OmniaToolDefinition[]): unknown[] {
           parameters: tool.parametersSchema,
         },
       });
+      continue;
+    }
+
+    if (tool.name === "gitlab_intelligence" || tool.type === "gitlab") {
+      definitions.push(GITLAB_INTELLIGENCE_TOOL_DEFINITION);
+      continue;
+    }
+
+    if (tool.name === "git_intelligence" || tool.type === "git") {
+      definitions.push(GIT_INTELLIGENCE_TOOL_DEFINITION);
       continue;
     }
 
@@ -461,14 +477,6 @@ export function buildOllamaTools(tools: OmniaToolDefinition[]): unknown[] {
         });
         break;
 
-      case "git":
-        definitions.push(GIT_INTELLIGENCE_TOOL_DEFINITION);
-        break;
-
-      case "gitlab":
-        definitions.push(GITLAB_INTELLIGENCE_TOOL_DEFINITION);
-        break;
-
       default:
         // Generic fallback definition
         definitions.push({
@@ -609,8 +617,10 @@ export async function executeToolByName(
       tool = tools.find((t) => t.type === "graphql");
     } else if (name === "inspect_api" || name === "omnia_inspect_docs") {
       tool = tools.find((t) => t.type === "inspect_api");
-    } else if (name === "git" || name === "git_inspector" || name === "omnia_git") {
-      tool = tools.find((t) => t.type === "git");
+    } else if (name === "gitlab" || name === "gitlab_intelligence" || name === "gitlab_inspector" || name === "omnia_gitlab" || name === "gitlab_repo_inspector") {
+      tool = tools.find((t) => t.type === "gitlab" || t.name === "gitlab_intelligence");
+    } else if (name === "git" || name === "git_intelligence" || name === "git_inspector" || name === "omnia_git") {
+      tool = tools.find((t) => t.type === "git" || t.name === "git_intelligence");
     }
   }
 

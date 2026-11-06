@@ -886,10 +886,11 @@ export async function executeGitLabIntelligence(
     undefined;
 
   // Resolve GitLab token from args, context, context.env, or process.env
-  let gitlabToken =
+  let gitlabToken: string | undefined =
     (typeof args.gitlabToken === "string" && args.gitlabToken.trim()) ||
     (typeof args.token === "string" && args.token.trim()) ||
-    (typeof context?.GITLAB_TOKEN === "string" && context.GITLAB_TOKEN.trim());
+    (typeof context?.GITLAB_TOKEN === "string" && context.GITLAB_TOKEN.trim()) ||
+    undefined;
 
   if (!gitlabToken && context?.env && typeof context.env === "object") {
     const envObj = context.env as Record<string, unknown>;
@@ -902,16 +903,17 @@ export async function executeGitLabIntelligence(
   }
 
   if (!gitlabToken) {
-    gitlabToken = process.env.GITLAB_TOKEN || process.env.GL_TOKEN || process.env.GITLAB_API_TOKEN;
+    gitlabToken = process.env.GITLAB_TOKEN || process.env.GL_TOKEN || process.env.GITLAB_API_TOKEN || undefined;
   }
 
   // Only consider repoPath if explicitly passed in args, or if no remote projectPath/projectId is provided
-  const repoPath =
+  const repoPath: string | undefined =
     (typeof args.repoPath === "string" && args.repoPath.trim()) ||
     (typeof args.repo === "string" && args.repo.trim()) ||
     (!projectPath && !projectId
       ? (typeof context?.workspacePath === "string" && context.workspacePath.trim()) ||
-        (typeof context?.cwd === "string" && context.cwd.trim())
+        (typeof context?.cwd === "string" && context.cwd.trim()) ||
+        undefined
       : undefined);
 
   const toolOptions: GitLabToolOptions = {
